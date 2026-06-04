@@ -55,4 +55,6 @@ dkms.conf
 *.dwo
 
 .vscode
+**/.vscode
+**/.devcontainer
 **/build/
