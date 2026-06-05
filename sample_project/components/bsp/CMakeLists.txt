@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+    "src/canfd_driver.cpp"    
+    "src/canfd_worker.cpp"                
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES 
+        logger
+        esp_driver_twai
+)

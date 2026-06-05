@@ -8,8 +8,6 @@
 #ifndef APP_INIT_HPP
 #define APP_INIT_HPP
 
-#include <esp_err.h>
-
 namespace app {
 
 /**
@@ -51,7 +49,6 @@ public:
 
 private:
     bool initialized_;            ///< Initialization state
-    bool logger_initialized_;     ///< Logger initialization state
 
     // Prevent copying
     AppInit(const AppInit&) = delete;

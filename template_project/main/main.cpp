@@ -10,13 +10,12 @@
  */
 
 #include <stdio.h>
-#include <cstring>
 #include <memory>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
-#include "esp_log.h"
+#include "esp_err.h"
 #include "nvs_flash.h"
 
 #include "project_config.h"
@@ -70,15 +69,12 @@ extern "C" void app_main(void)
     }
 
     /* Initialize application modules */
-    try {
+    {
         app::AppInit app_init_manager;
         if (!app_init_manager.initialize()) {
             LOG_ERROR(TAG, "Application initialization failed");
             esp_restart();
         }
-    } catch (const std::exception& e) {
-        LOG_ERROR(TAG, "Exception during initialization: %s", e.what());
-        esp_restart();
     }
 
     /* Create main application task */
@@ -112,12 +108,7 @@ namespace {
 
         while (1) {
             vTaskDelayUntil(&xLastWakeTime, xFrequency);
-            
-            try {
-                task_processor->process();
-            } catch (const std::exception& e) {
-                LOG_ERROR(TAG, "Exception in main task: %s", e.what());
-            }
+            task_processor->process();
         }
     }
 

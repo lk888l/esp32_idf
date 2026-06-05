@@ -31,19 +31,14 @@ namespace app {
             return true;
         }
 
-        try {
-            LOG_INFO(TAG, "Initializing ExampleModule");
-            
-            // Add your initialization code here
-            // Example: set up GPIO, initialize peripherals, etc.
-            
-            initialized_ = true;
-            LOG_INFO(TAG, "ExampleModule initialized successfully");
-            return true;
-        } catch (const std::exception& e) {
-            LOG_ERROR(TAG, "Initialization failed: %s", e.what());
-            return false;
-        }
+        LOG_INFO(TAG, "Initializing ExampleModule");
+        
+        // Add your initialization code here
+        // Example: set up GPIO, initialize peripherals, etc.
+        
+        initialized_ = true;
+        LOG_INFO(TAG, "ExampleModule initialized successfully");
+        return true;
     }
 
     bool ExampleModule::deinitialize(void) {
@@ -52,19 +47,14 @@ namespace app {
             return true;
         }
 
-        try {
-            LOG_INFO(TAG, "Deinitializing ExampleModule");
-            
-            // Add your deinitialization code here
-            // Example: cleanup GPIO, stop timers, etc.
-            
-            initialized_ = false;
-            LOG_INFO(TAG, "ExampleModule deinitialized successfully");
-            return true;
-        } catch (const std::exception& e) {
-            LOG_ERROR(TAG, "Deinitialization failed: %s", e.what());
-            return false;
-        }
+        LOG_INFO(TAG, "Deinitializing ExampleModule");
+        
+        // Add your deinitialization code here
+        // Example: cleanup GPIO, stop timers, etc.
+        
+        initialized_ = false;
+        LOG_INFO(TAG, "ExampleModule deinitialized successfully");
+        return true;
     }
 
     bool ExampleModule::is_initialized(void) const {

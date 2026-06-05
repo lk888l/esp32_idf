@@ -14,7 +14,6 @@ idf_component_register(
     PRIV_REQUIRES
         esp_common
         esp_system
-        log
         freertos
 )
 
@@ -22,9 +21,7 @@ idf_component_register(
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wall
     -Wextra
-    -Wpedantic
     -std=c++17
-    -fexceptions
     -fno-rtti
 )
 

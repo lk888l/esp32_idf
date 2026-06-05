@@ -27,14 +27,13 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions -fno-rtti")
 add_compile_options(
     -Wall
     -Wextra
-    -Wpedantic
-    -Wstrict-prototypes
+
     -Wwrite-strings
-    -Wunreachable-code
     -Wuninitialized
     -Winit-self
     -Wduplicated-branches
     -Wduplicated-cond
+    
     $<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>
     $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
     $<$<COMPILE_LANGUAGE:CXX>:-Wshadow>

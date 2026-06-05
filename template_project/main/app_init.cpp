@@ -3,9 +3,6 @@
  * @brief Application initialization implementation (C++)
  */
 
-#include <cstring>
-#include "esp_err.h"
-#include "esp_log.h"
 #include "logger.h"
 #include "app_init.hpp"
 
@@ -16,7 +13,7 @@ namespace app {
     }
 
     // Constructor
-    AppInit::AppInit() : initialized_(false), logger_initialized_(false) {
+    AppInit::AppInit() : initialized_(false) {
         LOG_INFO(TAG, "AppInit instance created");
     }
 
@@ -35,16 +32,10 @@ namespace app {
 
         LOG_INFO(TAG, "Initializing application modules");
 
-        try {
-            // Initialize application-specific modules here
-            
-            initialized_ = true;
-            LOG_INFO(TAG, "Application modules initialized successfully");
-            return true;
-        } catch (const std::exception& e) {
-            LOG_ERROR(TAG, "Initialization failed: %s", e.what());
-            return false;
-        }
+        // Initialize application-specific modules here
+        initialized_ = true;
+        LOG_INFO(TAG, "Application modules initialized successfully");
+        return true;
     }
 
     bool AppInit::deinitialize(void) {
@@ -53,18 +44,13 @@ namespace app {
             return true;
         }
 
-        try {
-            LOG_INFO(TAG, "Deinitializing application modules");
+        LOG_INFO(TAG, "Deinitializing application modules");
 
-            // Deinitialize application-specific modules here
+        // Deinitialize application-specific modules here
 
-            initialized_ = false;
-            LOG_INFO(TAG, "Application modules deinitialized successfully");
-            return true;
-        } catch (const std::exception& e) {
-            LOG_ERROR(TAG, "Deinitialization failed: %s", e.what());
-            return false;
-        }
+        initialized_ = false;
+        LOG_INFO(TAG, "Application modules deinitialized successfully");
+        return true;
     }
 
     bool AppInit::is_initialized(void) const {
