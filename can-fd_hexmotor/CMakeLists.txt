@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(sample_project
+project(can-fd_hexmotor
         VERSION 1.0.0
         LANGUAGES C CXX
     )

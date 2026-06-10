@@ -7,4 +7,5 @@ idf_component_register(
     REQUIRES 
         logger
         esp_driver_twai
+        base
 )

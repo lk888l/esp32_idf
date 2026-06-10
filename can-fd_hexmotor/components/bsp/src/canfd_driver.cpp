@@ -5,8 +5,7 @@
 #include "esp_err.h"
 #include <cstring>
 
-Esp32CanFdDriver::
-Esp32CanFdDriver(const Config& cfg)
+Esp32CanFdDriver::Esp32CanFdDriver(const Config& cfg)
     : config_(cfg)
 {
 }
@@ -85,8 +84,7 @@ bool Esp32CanFdDriver::stop()
     return true;
 }
 
-bool Esp32CanFdDriver::send(
-    const bsp::canfd::Frame& frame)
+bool Esp32CanFdDriver::send(const bsp::canfd::Frame& frame)
 {
     twai_frame_t tx = {};
 
@@ -119,64 +117,32 @@ bool Esp32CanFdDriver::send(
     return err == ESP_OK;
 }
 
-bool Esp32CanFdDriver::push_rx_frame(
-    const bsp::canfd::Frame& frame)
+bool Esp32CanFdDriver::push_rx_buffer( const bsp::canfd::Frame& frame)
 {
-    auto head =
-        rx_ring_.head.load(
-            std::memory_order_relaxed);
-
-    auto next =
-        (head + 1) % RX_RING_SIZE;
-
-    auto tail =
-        rx_ring_.tail.load(
-            std::memory_order_acquire);
-
-    if(next == tail)
-    {
-        return false;
-    }
-
-    rx_ring_.buffer[head] = frame;
-
-    rx_ring_.head.store(
-        next,
-        std::memory_order_release);
-
-    return true;
+    return rx_buffer.push(frame);
 }
 
-bool Esp32CanFdDriver::pop_rx_frame(
-    bsp::canfd::Frame& frame)
+bool Esp32CanFdDriver::pop_rx_buffer(bsp::canfd::Frame& frame)
 {
-    auto tail =
-        rx_ring_.tail.load(
-            std::memory_order_relaxed);
-
-    auto head =
-        rx_ring_.head.load(
-            std::memory_order_acquire);
-
-    if(tail == head)
-    {
-        return false;
-    }
-
-    frame =
-        rx_ring_.buffer[tail];
-
-    rx_ring_.tail.store(
-        (tail + 1) % RX_RING_SIZE,
-        std::memory_order_release);
-
-    return true;
+    return rx_buffer.pop(frame);
 }
 
-bool Esp32CanFdDriver::on_rx_done(
-    twai_node_handle_t node,
-    const twai_rx_done_event_data_t*,
-    void* user_ctx)
+void Esp32CanFdDriver::signal_RxComplete(std::function<void(bsp::canfd::Frame&)> slot) {
+    while(!rx_buffer.empty()) {
+        bsp::canfd::Frame frame;    
+        if(pop_rx_buffer(frame)) {
+            slot(frame);
+        }
+    }
+}
+
+size_t Esp32CanFdDriver::size_rx_buffer() const { return rx_buffer.size(); }
+
+bool Esp32CanFdDriver::emply_rx_buffer() const { 
+        return rx_buffer.empty();
+    }
+
+bool Esp32CanFdDriver::on_rx_done(twai_node_handle_t node, const twai_rx_done_event_data_t *edata, void* user_ctx)
 {
     auto* self =
         static_cast<Esp32CanFdDriver*>(
@@ -218,7 +184,11 @@ bool Esp32CanFdDriver::on_rx_done(
         data,
         frame.dlc);
 
-    self->push_rx_frame(frame);
+    self->push_rx_buffer(frame);
+
+    //emit signal to reactor
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    self->emitFromISR(self->RxReceive_cfg,&xHigherPriorityTaskWoken);
 
     return false;
 }
