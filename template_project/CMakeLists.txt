@@ -20,18 +20,23 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Set C++ specific options
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions -fno-rtti")
+
 # Set compilation flags for better code quality
 add_compile_options(
     -Wall
     -Wextra
-    -Wpedantic
-    -Wstrict-prototypes
+
     -Wwrite-strings
-    -Wunreachable-code
     -Wuninitialized
     -Winit-self
     -Wduplicated-branches
     -Wduplicated-cond
+    
+    $<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wshadow>
 )
 
 # Project configuration

@@ -5,8 +5,6 @@
 
 #include <stdio.h>
 #include <stdarg.h>
-#include <time.h>
-#include "esp_log.h"
 #include "logger.h"
 
 /* Log configuration */
@@ -26,7 +24,6 @@ static const char *level_names[] = {
 void logger_init(log_level_t level)
 {
     current_level = level;
-    esp_log_level_set("*", ESP_LOG_INFO);
 }
 
 /**

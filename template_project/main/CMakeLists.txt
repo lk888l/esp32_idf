@@ -1,8 +1,9 @@
 idf_component_register(
     SRCS 
-        "main.c"
-        "app_init.c"
-        "app_tasks.c"
+        "main.cpp"
+        "app_init.cpp"
+        "app_tasks.cpp"
+        "app_manager.cpp"
     INCLUDE_DIRS 
         "."
         "include"
@@ -13,15 +14,20 @@ idf_component_register(
     PRIV_REQUIRES
         esp_common
         esp_system
-        log
         freertos
 )
 
-# Set component-specific compilation flags
+# Set component-specific compilation flags for C++
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wall
     -Wextra
-    -Wpedantic
+    -std=c++17
+    -fno-rtti
+)
+
+# Enable C++ exceptions and thread-safe statics for ESP32
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
 )
 
 # Component version
