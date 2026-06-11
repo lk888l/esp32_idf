@@ -1,4 +1,6 @@
 #include "hexfellow_motor_ctrl_task.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 #include "esp_log.h"
 #include <cstring>
 
@@ -21,6 +23,15 @@ HexfellowMotorCtrlTask::HexfellowMotorCtrlTask(Esp32CanFdDriver& can_driver,
 HexfellowMotorCtrlTask::~HexfellowMotorCtrlTask()
 {
     cleanup();
+}
+
+void HexfellowMotorCtrlTask::hexfellow_mit_mapping_default(hexfellow_mit_mapping_t* mapping) {
+    mapping->position_min = -0.5f,  mapping->position_max = 0.5f,
+    mapping->velocity_min = -10.0f, mapping->velocity_max = 10.0f,
+    mapping->torque_min   = -10.0f, mapping->torque_max   = 10.0f,
+    mapping->kp_min       = 0.0f,   mapping->kp_max       = 100.0f,
+    mapping->kd_min       = 0.0f,   mapping->kd_max       = 20.0f;
+
 }
 
 void HexfellowMotorCtrlTask::setMitTarget(uint8_t index, const hexfellow_mit_target_t& target)
@@ -54,10 +65,16 @@ void HexfellowMotorCtrlTask::getMotorSnapshot(uint8_t index, hexfellow_motor_sta
 bool HexfellowMotorCtrlTask::initMotors()
 {
     ESP_LOGI(TAG, "Starting sequential SDO configuration for %d motors...", set_.count);
-
+    // Firtly, send NMT to 
+    if(!sendNmt(0x80, 0)){
+        ESP_LOGE(TAG, "Failed to send NMT Stop to all nodes");
+        return false;
+    }
     for (uint8_t i = 0; i < set_.count; ++i) {
         uint8_t node_id = set_.motors[i].node_id;
  
+        hexfellow_mit_mapping_default(&set_.mapping);
+
          // 0. 基础通信验证：读取厂商特定的唯一 ID 以确认设备响应正常 (Index 0x1018, Sub 0x01)
         uint32_t fw_ver = 0;
         if (sdo_master_.ul_u32(node_id, 0x1018, 1, &fw_ver, 100) != 0) {
@@ -83,7 +100,7 @@ bool HexfellowMotorCtrlTask::initMotors()
         // 3. 读取峰值扭矩并更新本地环境参数 (Index 0x6076, Sub 0x00)
         sdo_master_.ul_f32(node_id, 0x6076, 0, &set_.motors[i].peak_torque_mNm, 100);
 
-        // 8. CiA402 状态机有序使能 (Index 0x6040)
+        // 8. CiA402 状态机有序使能 (Index 0x6040): Shutdown (0x06) -> Switch On (0x07) -> Enable Operation (0x0F)
         uint16_t state_cmds[] = {0x0000, 0x0080, 0x0080};
         for (uint16_t cmd : state_cmds) {
             if (sdo_master_.dl_u16(node_id, 0x6040, 0, cmd, 100) != 0) {
@@ -113,8 +130,31 @@ bool HexfellowMotorCtrlTask::initMotors()
         // 5. MIT 独有参数设定: 写入限制范围 (Index 0x2004, Sub 0x0E)
         if (set_.mode == HEXFELLOW_MODE_KIND_MIT) {
             sdo_master_.dl_u16(node_id, 0x2004, 0x0E, set_.kp_kd_torque_permille, 100);
-        }
+            sdo_master_.dl_f32(node_id, 0x2004, 0x04, set_.mapping.position_min, 100);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x05, set_.mapping.position_max, 100);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x06, set_.mapping.velocity_min, 100);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x07, set_.mapping.velocity_max, 100);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x08, set_.mapping.kp_min, 100);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x09, set_.mapping.kp_max, 100);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x0A, set_.mapping.kd_min, 100);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x0B, set_.mapping.torque_min, 100);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x0D, set_.mapping.torque_max, 100);
 
+            /* Pre-load 2004h-02/03 with a zero-target value so the first frame
+            * after enable doesn't cause an instantaneous torque spike. */
+            hexfellow_mit_target_t zero = {0};
+            uint8_t bytes[8];
+            hexfellow_mit_target_pack(&zero, set_.mapping, bytes);
+            uint32_t lo = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+                        ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+            uint32_t hi = (uint32_t)bytes[4] | ((uint32_t)bytes[5] << 8) |
+                        ((uint32_t)bytes[6] << 16) | ((uint32_t)bytes[7] << 24);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x02, lo, 100);
+            sdo_master_.dl_f32(node_id, 0x2004, 0x03, hi, 100);
+
+            /* Enable compressed MIT control parameter. */
+            sdo_master_.dl_f32(node_id, 0x2004, 0x01, 1, 100);
+        }
 
 
         // 6. 核心安全配置：配置 Consumer Heartbeat 监测 Master (Index 0x1016, Sub 0x01)
@@ -133,7 +173,7 @@ bool HexfellowMotorCtrlTask::initMotors()
         }
 
         ESP_LOGI(TAG, "Motor node %d SDO config done. Node is ready.", node_id);
-    }
+
 
     // 9. NMT 广播指令切换：全线转入 Operational 运行状态 (Node=0 广播)
     if (!sendNmt(0x01, 0)) {
@@ -142,6 +182,49 @@ bool HexfellowMotorCtrlTask::initMotors()
     }
     ESP_LOGI(TAG, "All nodes moved to NMT Operational state successfully.");
     return true;
+}
+
+inline uint32_t HexfellowMotorCtrlTask::float_to_uint(float x, float xmin, float xmax,
+                                                      uint32_t bits)
+{
+        float span = xmax - xmin;
+        float scale = (float)((1u << bits) - 1u);
+        return (uint32_t)(((x - xmin) * scale) / span);
+}
+
+inline void HexfellowMotorCtrlTask::store_u32_le(uint8_t dst[4], uint32_t v)
+{
+    dst[0] = (uint8_t)(v & 0xFFu);
+    dst[1] = (uint8_t)((v >> 8) & 0xFFu);
+    dst[2] = (uint8_t)((v >> 16) & 0xFFu);
+    dst[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
+void HexfellowMotorCtrlTask::hexfellow_mit_target_pack(const hexfellow_mit_target_t* t,
+                                                       const hexfellow_mit_mapping_t* m,
+                                                       uint8_t out[8])
+{
+    float position = this->clamp(t->position, m->position_min, m->position_max);
+    float velocity = this->clamp(t->velocity, m->velocity_min, m->velocity_max);
+    float torque   = this->clamp(t->torque,   m->torque_min,   m->torque_max);
+    float kp       = this->clamp(t->kp,       m->kp_min,       m->kp_max);
+    float kd       = this->clamp(t->kd,       m->kd_min,       m->kd_max);
+
+    uint32_t pos_u  = float_to_uint(position, m->position_min, m->position_max, 16);
+    uint32_t vel_u  = float_to_uint(velocity, m->velocity_min, m->velocity_max, 12);
+    uint32_t torq_u = float_to_uint(torque,   m->torque_min,   m->torque_max,   12);
+    uint32_t kp_u   = float_to_uint(kp,       m->kp_min,       m->kp_max,       12);
+    uint32_t kd_u   = float_to_uint(kd,       m->kd_min,       m->kd_max,       12);
+
+    uint32_t lower_u32 = torq_u | (kd_u << 12) | ((kp_u & 0xFFu) << 24);
+    uint32_t upper_u32 = (kp_u >> 8) | (vel_u << 4) | (pos_u << 16);
+
+    store_u32_le(out,     lower_u32);
+    store_u32_le(out + 4, upper_u32);
+}
+
+void HexfellowMotorCtrlTask::configure_tpdo1(uint8_t id) {
+    
 }
 
 void HexfellowMotorCtrlTask::main()

@@ -13,7 +13,7 @@
 typedef enum {
     HEXFELLOW_MODE_KIND_MIT      = 0,
     HEXFELLOW_MODE_KIND_VELOCITY = 1,
-} hexfellow_mode_kind_t;
+} mode_kind_t;
 
 typedef struct {
     uint8_t  node_id;
@@ -23,13 +23,22 @@ typedef struct {
 } hexfellow_motor_runtime_t;
 
 typedef struct {
-    hexfellow_mode_kind_t mode;
+    mode_kind_t mode;
     uint8_t               count;
     uint16_t              torque_permille;
     uint16_t              kp_kd_torque_permille;
     uint16_t              mapping_placeholder; 
+    hexfellow_mit_mapping_t mapping;             /* MIT only */
     hexfellow_motor_runtime_t motors[HEXFELLOW_MAX_MOTORS];
 } hexfellow_motor_set_t;
+
+typedef struct {
+    float position_min, position_max;     /* Rev */
+    float velocity_min, velocity_max;     /* Rev/s */
+    float torque_min, torque_max;         /* Nm */
+    float kp_min, kp_max;                 /* Nm/Rev */
+    float kd_min, kd_max;                 /* Nm*s/Rev */
+} hexfellow_mit_mapping_t;
 
 typedef struct {
     float    position;
@@ -68,12 +77,37 @@ public:
                            const hexfellow_motor_set_t& config);
     virtual ~HexfellowMotorCtrlTask();
 
+    static void hexfellow_mit_mapping_default(hexfellow_mit_mapping_t* mapping);
+
     // 提供给应用层修改控制目标的线程安全 API
     void setMitTarget(uint8_t index, const hexfellow_mit_target_t& target);
     void setVelocityTarget(uint8_t index, float target_rev_s, uint16_t torque_permille);
     
     // 提供给上层读取状态快照的线程安全 API
     void getMotorSnapshot(uint8_t index, hexfellow_motor_state_t& out_state);
+
+    // some other function
+    /// Mit function
+    template<class T>
+    constexpr const T& clamp(const T& v, const T& lo, const T& hi) {
+        // 确保下界不大于上界。如果 lo > hi，在标准库中属于未定义行为 (UB)
+        assert(!(hi < lo) && "Clamp limits are reversed!"); 
+        
+        // 如果 v 小于下界，返回下界；如果上界小于 v，返回上界；否则返回 v
+        return (v < lo) ? lo : (hi < v) ? hi : v;
+    }
+
+    static inline uint32_t float_to_uint(float x, float xmin, float xmax, uint32_t bits);
+
+    static inline void store_u32_le(uint8_t dst[4], uint32_t v);
+
+    void hexfellow_mit_target_pack(const hexfellow_mit_target_t *t,
+                               const hexfellow_mit_mapping_t *m,
+                               uint8_t out[8]);
+
+    //some PDO configure function
+    void configure_tpdo1(uint8_t id);
+    void configure_tpdo2(uint8_t id);
 
 protected:
     void main() override;
@@ -104,4 +138,5 @@ private:
     float                   vel_target_rev_s_[HEXFELLOW_MAX_MOTORS];
     uint16_t                vel_torque_permille_[HEXFELLOW_MAX_MOTORS];
     hexfellow_motor_state_t states_[HEXFELLOW_MAX_MOTORS];
+    hexfellow_mit_mapping_t mit_mapping_;  // Only MIT 
 };
