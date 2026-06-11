@@ -19,19 +19,12 @@ public:
     bool start();
     void stop();
 
-    bool isRunning() const
-    {
-        return running_;
-    }
+    bool isRunning() const{return running_;}
 
-    const std::string& name() const
-    {
-        return name_;
-    }
+    const std::string& name() const{return name_;}
 
 protected:
-    virtual void setup() {}
-    virtual void loop() = 0;
+    virtual void main() = 0;
     virtual void cleanup() {}
 
     bool shouldExit() const

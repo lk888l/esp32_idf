@@ -45,11 +45,21 @@ void AppTask::stop()
         return;
     }
 
-    exit_requested_ = true;
+    // exit_requested_ = true;
 
-    while (running_)
+    // while (running_)
+    // {
+    //     vTaskDelay(pdMS_TO_TICKS(100));
+    // }
+
+    cleanup();
+
+    running_ = false;
+
+    if (handle_ != nullptr)
     {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelete(handle_);
+        handle_ = nullptr;
     }
 }
 
@@ -59,12 +69,7 @@ void AppTask::taskEntry(void* arg)
 
     self->running_ = true;
 
-    self->setup();
-
-    while (!self->exit_requested_)
-    {
-        self->loop();
-    }
+    self->main();
 
     self->cleanup();
 

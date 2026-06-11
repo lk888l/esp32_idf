@@ -1,4 +1,4 @@
-# ESP-IDF C++ Template
+# ESP-IDF C++ - HexMotor control 
 
 这是一个最小的 ESP-IDF C++ 项目模板，包含模块化组件示例（`logger`）。
 
