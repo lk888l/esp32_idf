@@ -46,6 +46,11 @@ class co_master_sdo {
         int ul_f32(uint8_t n, uint16_t i, uint8_t sub, float    *v, int timeout_ms = 100);
 
         /**
+         * @brief 获取当前 SDO 客户端所使用的通知比特掩码
+         */
+        uint32_t get_notification_bit() const { return notification_bit_; }
+
+        /**
          * @brief 错误码转字符串
          */
         const char* strerr(SdoResult rc);

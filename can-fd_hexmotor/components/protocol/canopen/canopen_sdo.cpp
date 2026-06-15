@@ -21,10 +21,10 @@ void co_master_sdo::drain_rx_buffer() {
 
 bool co_master_sdo::send_sdo_frame(uint8_t node, const uint8_t cmd[8])
 {
-    bsp::canfd::Frame frame;
+    bsp::canfd::Frame frame{};
     frame.id = (COB_RSDO | node) & 0x7FFu;
     frame.extended = false;
-    frame.fd_format = false;        // SDO 属于传统经典 CAN 帧
+    frame.fd_format = false;        // SDO: classic CAN frame
     frame.bitrate_switch = false;
     frame.dlc = 8;
     std::memcpy(frame.data.data(), cmd, 8);

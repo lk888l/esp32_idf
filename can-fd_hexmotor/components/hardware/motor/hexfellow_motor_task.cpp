@@ -1,5 +1,6 @@
 // hexfellow_motor_task.cpp
 #include "hexfellow_motor_task.hpp"
+#include "esp_log.h"
 
 HexfellowMotorTask::HexfellowMotorTask(const std::string& name,
                                        uint32_t stack_size,
@@ -21,7 +22,7 @@ bool HexfellowMotorTask::initMotors()
     return initialized_;
 }
 
-void HexfellowMotorTask::setMitTarget(uint8_t index, const mit_target_t& target)
+void HexfellowMotorTask::setMitTarget(uint8_t index, const HexfellowMotorController::mit_target_t& target)
 {
     controller_.setMitTarget(index, target);
 }
@@ -38,6 +39,15 @@ void HexfellowMotorTask::snapshot(uint8_t index, HexfellowMotorController::Motor
 
 void HexfellowMotorTask::main()
 {
+    /* Re-bind the CAN RX signal to THIS task's handle.
+     * The original bindReactor() in app_main() pointed to app_main's task,
+     * but all SDO operations run in HexfellowMotorTask's context.  Without
+     * this re-bind, the ISR notifies the wrong task and every SDO times out.
+     */
+    driver_.bindReactor(&Esp32CanFdDriver::signal_RxComplete,
+                        xTaskGetCurrentTaskHandle(),
+                        sdo_.get_notification_bit());
+
     if (!initialized_) {
         if (!controller_.init(sdo_, driver_)) {
             return;
@@ -45,18 +55,26 @@ void HexfellowMotorTask::main()
         initialized_ = true;
     }
 
+    const TickType_t hb_period_ticks = pdMS_TO_TICKS(HexfellowMotorController::MASTER_HB_PERIOD_MS);
+    TickType_t hb_last = xTaskGetTickCount();
+
+    /* Initialise the periodic wake-time anchor just before the loop.
+     * vTaskDelayUntil internally sets *pxPreviousWakeTime on the first call
+     * if it is stale, but providing the current tick count avoids an
+     * immediate catch-up burst when init() took significant time. */
     TickType_t last_wake = xTaskGetTickCount();
-    TickType_t hb_last = 0;
+    const TickType_t period_ticks = pdMS_TO_TICKS(RPDO_PERIOD_MS);
 
     for (;;) {
         if (shouldExit()) {
             break;
         }
 
+        /* --- Heartbeat (50 ms) --- */
         const TickType_t now = xTaskGetTickCount();
-        if ((now - hb_last) >= pdMS_TO_TICKS(HEXFELLOW_MASTER_HB_PERIOD_MS)) {
+        if ((now - hb_last) >= hb_period_ticks) {
             bsp::canfd::Frame hb{};
-            hb.id = HEXFELLOW_COB_HB | HEXFELLOW_MASTER_NODE_ID;
+            hb.id = HexfellowMotorController::COB_HB | HexfellowMotorController::MASTER_NODE_ID;
             hb.extended = false;
             hb.fd_format = false;
             hb.bitrate_switch = false;
@@ -66,14 +84,16 @@ void HexfellowMotorTask::main()
             hb_last = now;
         }
 
+        /* --- RPDO --- */
         bsp::canfd::Frame rpdo{};
         controller_.buildRpdoFrame(rpdo);
         driver_.send(rpdo);
 
+        /* --- Process received CAN frames --- */
         driver_.signal_RxComplete([this](bsp::canfd::Frame& frame) {
             controller_.handleRxFrame(frame);
         });
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(HEXFELLOW_RPDO_PERIOD_MS));
+        vTaskDelayUntil(&last_wake, period_ticks);
     }
 }

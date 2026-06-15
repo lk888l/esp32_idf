@@ -9,12 +9,57 @@
 // #include "hexfellow_motor_init.h"
 // #include "hexfellow_mit_target.h"
 #include "canfd_driver.hpp"
-#include "canopen_sdo.hpp"
+#include "canopen/canopen_sdo.hpp"
 
 class HexfellowMotorController
 {
 public:
+    /*----------------   hex motor static variable define   ----------------*/ \
+    /* Master node ID for this controller. The motors are configured to monitor
+    * heartbeats from this node. */
+    constexpr static uint8_t MASTER_NODE_ID = 0x10u;
+    /* Shared RPDO COB-ID used for one-to-many control. Equal to the master's
+    * default TPDO1 COB-ID (0x180 + 0x10). */
+    constexpr static uint16_t HEXFELLOW_RPDO_COB_ID = 0x190u;
 
+    /* Maximum number of motors on a single CAN bus. CAN-FD frame data length
+    * is 64 bytes, so 8 motors * 8 bytes/motor = 64 bytes (MIT mode). */
+    constexpr static uint8_t MAX_MOTORS = 8;
+
+    /* Vendor / firmware checks (1018h identity object). */
+    constexpr static uint32_t FACTORY_UID = 0x4859444Cu;  /* factory UID reported by hexfellow firmware */
+    constexpr static uint8_t MIN_VERSION = 8u;           /* minimum required firmware version */
+    constexpr static uint8_t MAX_VERSION = 9u;           /* maximum required firmware version */
+
+    /* Heartbeat parameters. */
+    constexpr static uint8_t MASTER_HB_PERIOD_MS  =  50u;
+    constexpr static uint8_t MOTOR_HB_TIMEOUT_MS  =  250u;
+
+    /* CiA301 default COB-IDs */
+    constexpr static uint16_t COB_NMT = 0x000u;
+    constexpr static uint16_t OB_TPDO1  =   0x180u;
+    constexpr static uint16_t COB_TPDO2  =   0x280u;
+    constexpr static uint16_t COB_RSD   =   0x600u;
+    constexpr static uint16_t COB_TSDO   =   0x580u;
+    constexpr static uint16_t COB_HB     =   0x700u;
+
+    /* TPDO event-timer / inhibit values (in 0.1ms units for inhibit, ms for event). */
+    constexpr static uint8_t TPDO1_INHIBIT_X100US = 5u;
+    constexpr static uint8_t TPDO1_EVENT_MS=1u;
+    constexpr static uint8_t TPDO2_INHIBIT_X100US = 190u;
+    constexpr static uint8_t TPDO2_EVENT_MS=20u;
+
+    /* NMT command bytes */
+    constexpr static uint8_t NMT_OPERATIONAL = 0x01u;
+    constexpr static uint8_t NMT_PRE_OPERATIONAL=0x80u;
+    constexpr static uint8_t NMT_RESET_NODE = 0x81u;
+    constexpr static uint8_t NMT_RESET_COMM = 0x82u;
+
+    /* CiA402 modes-of-operation values */
+    constexpr static uint8_t MODE_PROFILE_VELOCITY = 3;   /* 6060h = 3 (mode 3) */
+    constexpr static uint8_t MODE_MIT        =       5;   /* 6060h = 5 (MIT mode) */
+
+    /*----------------   hex motor static variable define   ----------------*/ 
     /*----------------   hex motor configure type   ----------------*/ 
     typedef enum {
         HEXFELLOW_MODE_KIND_MIT      = 0,
@@ -37,23 +82,13 @@ public:
         float kd;           /* Nm*s/Rev */
     } mit_target_t;
 
-    typedef struct {
-        mode_kind_t mode;
-        uint8_t               count;
-        uint16_t              torque_permille;
-        uint16_t              kp_kd_torque_permille;
-        uint16_t              mapping_placeholder; 
-        hexfellow_mit_mapping_t mapping;             /* MIT only */
-        hexfellow_motor_runtime_t motors[HEXFELLOW_MAX_MOTORS];
-    } hexfellow_motor_set_t;    
-
     struct Config
     {
         mode_kind_t mode{HEXFELLOW_MODE_KIND_MIT};
-        uint8_t  count{0};                         // 1..HEXFELLOW_MAX_MOTORS
+        uint8_t  count{0};                         // 1..MAX_MOTORS
         uint16_t torque_permille{0};               // 6072h
         uint16_t kp_kd_torque_permille{0};         // 2004h-0E, MIT only
-        mit_mapping_t mapping{};         // MIT only
+        mit_mapping_t cfg_mapping{};         // MIT only
     };
 
     struct MotorState
@@ -72,7 +107,29 @@ public:
         uint64_t last_tpdo1_ms{0};
         uint64_t last_tpdo2_ms{0};
     };
+
+
+
+    /* Per-motor information learned during initialization. */
+    typedef struct {
+        uint8_t  node_id;            /* CANopen ID, 1..N */
+        uint32_t firmware_version;   /* from 1018h-03 */
+        uint32_t serial_number;      /* from 1018h-04 */
+        float    peak_torque_mNm;    /* from 6076h (REAL32, mNm) */
+    } motor_runtime_t;
+
+    typedef struct {
+        mode_kind_t mode;
+        uint8_t               count;
+        uint16_t              torque_permille;
+        uint16_t              kp_kd_torque_permille;
+        uint16_t              mapping_placeholder; 
+        mit_mapping_t mapping;             /* MIT only */
+        motor_runtime_t motors[MAX_MOTORS];
+    } hexfellow_motor_set_t; 
     /*----------------   hex motor configure type   ----------------*/ 
+
+
 
 
 
@@ -92,6 +149,26 @@ public:
     uint8_t count() const { return set_.count; }
     mode_kind_t mode() const { return set_.mode; }
 
+    /**
+     * @brief 
+     */
+    static void hexfellow_mit_target_pack(const mit_target_t *t, const mit_mapping_t *m, uint8_t out[8]);
+
+    /**
+     * @brief 
+     */
+    template <typename T, typename L, typename H>
+    static constexpr typename std::common_type<T, L, H>::type 
+    clamp(const T& value, const L& low, const H& high) {
+        using CommonType = typename std::common_type<T, L, H>::type;
+        return (value < low) ? static_cast<CommonType>(low) : 
+            (high < value) ? static_cast<CommonType>(high) : 
+            static_cast<CommonType>(value);
+    }
+    static void mit_mapping_default(mit_mapping_t &mit_map);
+    static inline uint32_t float_to_uint(float x, float xmin, float xmax, uint32_t bits);
+    static inline void store_u32_le(uint8_t dst[4], uint32_t v);
+
 private:
     static uint64_t nowMs();
     static int32_t updateMultiTurn(int32_t prev_turns, float prev_pos, float new_pos);
@@ -110,10 +187,10 @@ private:
     Config set_{};
     hexfellow_motor_set_t runtime_set_{};
 
-    std::array<mit_target_t, HEXFELLOW_MAX_MOTORS> mit_targets_{};
-    std::array<float,    HEXFELLOW_MAX_MOTORS> vel_target_rev_s_{};
-    std::array<uint16_t, HEXFELLOW_MAX_MOTORS> vel_torque_permille_{};
-    std::array<MotorState, HEXFELLOW_MAX_MOTORS> state_{};
+    std::array<mit_target_t, MAX_MOTORS> mit_targets_{};
+    std::array<float,    MAX_MOTORS> vel_target_rev_s_{};
+    std::array<uint16_t, MAX_MOTORS> vel_torque_permille_{};
+    std::array<MotorState, MAX_MOTORS> state_{};
 
     mutable std::mutex mutex_;
 };

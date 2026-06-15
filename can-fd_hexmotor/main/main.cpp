@@ -10,9 +10,11 @@
 #include "canfd_driver.hpp"
 #include "TaskReactor.hpp"
 #include "canopen/canopen_sdo.hpp"
+#include "motor/hexfellow_motor_task.hpp"
 
-static const char *TAG = "app_main";
-static const char * MOTOR_TAG = "Motor_task";
+static const char * TAG         = "app_main";
+static const char * MOTOR_TAG   = "Motor_task";
+static const std::string HEXMOTOR    = "Motor_task";
 
 /********** global variable define beginning **********/
 //freeRTOS task handle
@@ -21,6 +23,7 @@ TaskHandle_t Handle_MotorControlFunc = nullptr;
 TaskReactor reactor(Handle_ReactorFunc);
 
 // Hardware driver instances
+
 
 /********** global variable define end       **********/
 
@@ -91,24 +94,42 @@ extern "C" void app_main(void)
     espidf_template::Logger logger(TAG);
     logger.info("ESP-IDF C++ template running");
 
-    // Esp32CanFdDriver::Config can_cfg = {};
-    // can_cfg.tx_pin = GPIO_NUM_4;
-    // can_cfg.rx_pin = GPIO_NUM_5;
-    // can_cfg.arbitration_bitrate = 1000000;
-    // can_cfg.data_bitrate = 5000000;
+    /// define Esp32CanFdDriver
+    Esp32CanFdDriver::Config can_cfg = {};
+    can_cfg.tx_pin = GPIO_NUM_4;
+    can_cfg.rx_pin = GPIO_NUM_5;
+    can_cfg.arbitration_bitrate = 1000000;
+    can_cfg.data_bitrate = 5000000;
+    Esp32CanFdDriver can_driver(can_cfg);
+    if(!can_driver.init()) {
+        logger.info("Failed to initialize CAN driver");
+        return;
+    }
+    if(!can_driver.start()) {
+        logger.info("Failed to start CAN driver");
+        return;
+    }
+    /// define sdo drive
+    // TODO: This way task random make a bitmask.
+    constexpr uint32_t CAN_RX_NOTIFY_BIT = (1 << 2);
+    // bind the CAN receive signal to the reactor with this task's handle and a unique bitmask.
+    // can_driver.bindReactor(&Esp32CanFdDriver::signal_RxComplete, xTaskGetCurrentTaskHandle(), CAN_RX_NOTIFY_BIT);
+    // Create a CANopen SDO master instance using the CAN driver and the same notification bit for synchronization
+    co_master_sdo sdo(can_driver, CAN_RX_NOTIFY_BIT);
+    HexfellowMotorController::Config cfg;
+    cfg.count = 1;
+    cfg.torque_permille = 300, cfg.kp_kd_torque_permille = 770;
+    HexfellowMotorController::mit_mapping_default(cfg.cfg_mapping);
 
-    // Esp32CanFdDriver can_driver(can_cfg);
-
-    // if(!can_driver.init()) {
-    //     logger.info("Failed to initialize CAN driver");
-    //     return;
-    // }
-
-    // if(!can_driver.start()) {
-    //     logger.info("Failed to start CAN driver");
-    //     return;
-    // }
-
+    HexfellowMotorTask hexmotor_task(HEXMOTOR, 8192, 8, sdo, can_driver, cfg);
+    HexfellowMotorController::mit_target_t target{};
+    target.position = 0.0f;
+    target.velocity = 1.0f;
+    target.kp = 0.0f;
+    target.kd = 2.0f;
+    target.torque = 0.0f;
+    hexmotor_task.setMitTarget(0,target);
+    if(!hexmotor_task.start()) {ESP_LOGE(TAG, "Initialization hexmotor task fail.");}
     // Create a task for the reactor function
     // BaseType_t xReturn = pdPASS;
     // xReturn = xTaskCreate((TaskFunction_t)ReactorFunc,
@@ -122,17 +143,19 @@ extern "C" void app_main(void)
     //     return;
     // }
     // Create a task for the motor control function
-    BaseType_t xReturn = pdPASS;
-    xReturn = xTaskCreate((TaskFunction_t)Motor_Control_Task,
-                        (const char*)"MotorControl",
-                        8192,
-                        (void*)NULL,
-                        (UBaseType_t)8,
-                        (TaskHandle_t*)&Handle_MotorControlFunc);
-    if (xReturn != pdPASS) {
-        logger.info("Failed to create motor control task");
-        return;
-    }
+    // BaseType_t xReturn = pdPASS;
+    // xReturn = xTaskCreate((TaskFunction_t)Motor_Control_Task,
+    //                     (const char*)"MotorControl",
+    //                     8192,
+    //                     (void*)NULL,
+    //                     (UBaseType_t)8,
+    //                     (TaskHandle_t*)&Handle_MotorControlFunc);
+    // if (xReturn != pdPASS) {
+    //     logger.info("Failed to create motor control task");
+    //     return;
+    // }
+
+
 
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask = (1ULL << GPIO_NUM_25); // 
@@ -142,41 +165,7 @@ extern "C" void app_main(void)
     io_conf.intr_type = GPIO_INTR_DISABLE;
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    // 稍等一下让任务启动完成
-    // vTaskDelay(pdMS_TO_TICKS(10));
-    // reactor.connect(&can_driver, &Esp32CanFdDriver::signal_RxComplete, [&logger](bsp::canfd::Frame& frame) {
-    //     // This lambda will be called when a CAN message is received
-    //     logger.info("CAN message received!");
-    //     ESP_LOGI("can", "Frame ID: 0x%08X", frame.id);
-    //     for(size_t i = 0; i < frame.dlc; ++i) {
-    //         ESP_LOGI("can", "Data[%lu]: 0x%02X", (unsigned long)i, frame.data[i]);
-    //     }
-    //     printf("\n");
-    // });
     while (true) {
-        // uint8_t data[8] = {
-        //     0x40,
-        //     0x18,
-        //     0x10,
-        //     0x01,
-        //     0x00,
-        //     0x00,
-        //     0x00,
-        //     0x00
-        // };
-
-        // bsp::canfd::Frame frame;
-        // frame.id = 0x601;
-        // frame.extended = false;
-        // frame.fd_format = false;
-        // frame.bitrate_switch = true;
-        // frame.dlc = 8;
-        // memcpy(frame.data.data(), data, 8);
-
-        // can_driver.send(frame);
-
-        // logger.info("Heartbeat"); 
-
         static int LED_State = 0;
         LED_State = !LED_State;
         gpio_set_level(GPIO_NUM_25, LED_State); // Toggle GPIO25 to show activity

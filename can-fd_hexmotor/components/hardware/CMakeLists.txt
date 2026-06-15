@@ -1,10 +1,12 @@
 idf_component_register(
     SRCS
         "motor/hexfellow_motor_controller.cpp"
+        "motor/hexfellow_motor_task.cpp"
     INCLUDE_DIRS 
         "."
-    REQUIRES 
+    REQUIRES
         bsp
         protocol
+        app
         driver
 )

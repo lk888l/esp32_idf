@@ -8,6 +8,7 @@ idf_component_register(
         logger
         bsp
         protocol
+        hardware
         driver
 )
 

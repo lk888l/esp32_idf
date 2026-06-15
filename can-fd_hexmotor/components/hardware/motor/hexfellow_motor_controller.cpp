@@ -2,6 +2,9 @@
 #include "hexfellow_motor_controller.hpp"
 
 #include <algorithm>
+#include <cstring>
+
+#include "esp_log.h"
 
 static constexpr uint8_t kTpdo1Len = 12;
 static constexpr uint8_t kTpdo2Len = 8;
@@ -14,8 +17,10 @@ HexfellowMotorController::HexfellowMotorController(const Config& cfg)
     runtime_set_.count = cfg.count;
     runtime_set_.torque_permille = cfg.torque_permille;
     runtime_set_.kp_kd_torque_permille = cfg.kp_kd_torque_permille;
-    runtime_set_.mapping = cfg.mapping;
+    runtime_set_.mapping = cfg.cfg_mapping;
 }
+
+
 
 uint64_t HexfellowMotorController::nowMs()
 {
@@ -33,7 +38,7 @@ int32_t HexfellowMotorController::updateMultiTurn(int32_t prev_turns, float prev
 bool HexfellowMotorController::sendNmt(Esp32CanFdDriver& driver, uint8_t cs, uint8_t node) const
 {
     bsp::canfd::Frame frame{};
-    frame.id = HEXFELLOW_COB_NMT;
+    frame.id = COB_NMT;
     frame.extended = false;
     frame.fd_format = false;
     frame.bitrate_switch = false;
@@ -54,8 +59,8 @@ void HexfellowMotorController::configureTpdo1(co_master_sdo& sdo, uint8_t id) co
     sdo.dl_u32(id, 0x1A00, 4, 0x603F0010u);
     sdo.dl_u8 (id, 0x1A00, 0, 4);
     sdo.dl_u8 (id, 0x1800, 2, 255);
-    sdo.dl_u16(id, 0x1800, 3, HEXFELLOW_TPDO1_INHIBIT_X100US);
-    sdo.dl_u16(id, 0x1800, 5, HEXFELLOW_TPDO1_EVENT_MS);
+    sdo.dl_u16(id, 0x1800, 3, TPDO1_INHIBIT_X100US);
+    sdo.dl_u16(id, 0x1800, 5, TPDO1_EVENT_MS);
     const uint32_t enable = 0x40000180u | id;
     sdo.dl_u32(id, 0x1800, 1, enable);
 }
@@ -72,8 +77,8 @@ void HexfellowMotorController::configureTpdo2(co_master_sdo& sdo, uint8_t id) co
     sdo.dl_u32(id, 0x1A01, 5, 0x603F0010u);
     sdo.dl_u8 (id, 0x1A01, 0, 5);
     sdo.dl_u8 (id, 0x1801, 2, 255);
-    sdo.dl_u16(id, 0x1801, 3, HEXFELLOW_TPDO2_INHIBIT_X100US);
-    sdo.dl_u16(id, 0x1801, 5, HEXFELLOW_TPDO2_EVENT_MS);
+    sdo.dl_u16(id, 0x1801, 3, TPDO2_INHIBIT_X100US);
+    sdo.dl_u16(id, 0x1801, 5, TPDO2_EVENT_MS);
     const uint32_t enable = 0x40000280u | id;
     sdo.dl_u32(id, 0x1801, 1, enable);
 }
@@ -90,7 +95,10 @@ void HexfellowMotorController::rpdoEnable(co_master_sdo& sdo, uint8_t id) const
     sdo.dl_u32(id, 0x1400, 1, HEXFELLOW_RPDO_COB_ID);
 }
 
-static uint32_t od_entry(uint16_t index, uint8_t sub, uint8_t bitlen)
+/**
+ * @brief static
+ */
+constexpr static uint32_t od_entry(uint16_t index, uint8_t sub, uint8_t bitlen)
 {
     return (static_cast<uint32_t>(index) << 16) |
            (static_cast<uint32_t>(sub) << 8) |
@@ -138,20 +146,26 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
 {
     const uint8_t id = runtime_set_.motors[index].node_id;
 
-    if (!sendNmt(driver, HEXFELLOW_NMT_PRE_OPERATIONAL, id)) {
+    /* 1) NMT -> Pre-Operational so we can SDO-configure the motor. */
+    if (!sendNmt(driver, NMT_PRE_OPERATIONAL, id)) {
         return false;
     }
     vTaskDelay(pdMS_TO_TICKS(50));
 
+    /* 2) Validate factory UID. */
     uint32_t factory_uid = 0;
-    if (sdo.ul_u32(id, 0x1018, 1, &factory_uid) != 0) return false;
-    if (factory_uid != HEXFELLOW_FACTORY_UID) return false;
+    if (sdo.ul_u32(id, 0x1018, 1, &factory_uid) != 0) {return false;ESP_LOGI("morot_debug","0x1018, 1 sdo fail\n");}
+    if (factory_uid != FACTORY_UID) {return false;ESP_LOGI("morot_debug","0x1018, 1 sdo fail\n");}
 
+    /* 3) Validate firmware version (must be within [min, max]). */
     uint32_t fw = 0;
     if (sdo.ul_u32(id, 0x1018, 3, &fw) != 0) return false;
-    if (fw != HEXFELLOW_REQUIRED_VERSION) return false;
+    if (fw < MIN_VERSION || fw > MAX_VERSION) {
+        return false;
+    }
     runtime_set_.motors[index].firmware_version = fw;
 
+    /* 4) Read serial number and peak torque (constants). */
     uint32_t serial = 0;
     if (sdo.ul_u32(id, 0x1018, 4, &serial) != 0) return false;
     runtime_set_.motors[index].serial_number = serial;
@@ -160,6 +174,7 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
     if (sdo.ul_f32(id, 0x6076, 0, &peak) != 0) return false;
     runtime_set_.motors[index].peak_torque_mNm = peak;
 
+    /* 5) Reset CiA402 state machine and clear faults. */
     sdo.dl_u16(id, 0x6040, 0, 0x0000);
     vTaskDelay(pdMS_TO_TICKS(10));
     sdo.dl_u16(id, 0x6040, 0, 0x0080);
@@ -167,10 +182,14 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
     sdo.dl_u16(id, 0x6040, 0, 0x0080);
     vTaskDelay(pdMS_TO_TICKS(10));
 
+    /* 6) Disable consumer-heartbeat monitoring while we reconfigure. */
     sdo.dl_u32(id, 0x1016, 1, 0);
+    /* 7) Short-circuit-brake on disable. */
     sdo.dl_u8(id, 0x2040, 0, 1);
+    /* 8) Per-mode max-torque (6072h). */
     sdo.dl_u16(id, 0x6072, 0, runtime_set_.torque_permille);
 
+    /* 9) MIT-specific: KP/KD output torque limit and target ranges. */
     if (runtime_set_.mode == HEXFELLOW_MODE_KIND_MIT) {
         const auto& m = runtime_set_.mapping;
         sdo.dl_u16(id, 0x2004, 0x0E, runtime_set_.kp_kd_torque_permille);
@@ -185,6 +204,8 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
         sdo.dl_f32(id, 0x2004, 0x0C, m.torque_min);
         sdo.dl_f32(id, 0x2004, 0x0D, m.torque_max);
 
+        /* Pre-load 2004h-02/03 with a zero-target value so the first frame
+        * after enable doesn't cause an instantaneous torque spike. */
         mit_target_t zero{};
         uint8_t bytes[8]{};
         hexfellow_mit_target_pack(&zero, &m, bytes);
@@ -201,9 +222,11 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
         sdo.dl_u8(id, 0x2004, 0x01, 1);
     }
 
+    /* 10) TPDO1/2 mapping. */
     configureTpdo1(sdo, id);
     configureTpdo2(sdo, id);
 
+    /* 11) RPDO1: shared 0x190 + per-motor mapping. */
     rpdoDisable(sdo, id);
     if (runtime_set_.mode == HEXFELLOW_MODE_KIND_MIT) {
         rpdoMapMit(sdo, id, index, runtime_set_.count);
@@ -212,15 +235,18 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
     }
     rpdoEnable(sdo, id);
 
-    const uint32_t hb = (static_cast<uint32_t>(HEXFELLOW_MASTER_NODE_ID) << 16) |
-                        HEXFELLOW_MOTOR_HB_TIMEOUT_MS;
+    /* 12) Re-enable consumer-heartbeat monitoring of the master. */
+    const uint32_t hb = (static_cast<uint32_t>(MASTER_NODE_ID) << 16) |
+                        MOTOR_HB_TIMEOUT_MS;
     sdo.dl_u32(id, 0x1016, 1, hb);
 
+    /* 13) Mode of operation (MIT=5, Profile Velocity=3). */
     const int8_t mode_value = (runtime_set_.mode == HEXFELLOW_MODE_KIND_MIT)
-                                ? HEXFELLOW_MODE_MIT
-                                : HEXFELLOW_MODE_PROFILE_VELOCITY;
+                                ? MODE_MIT
+                                : MODE_PROFILE_VELOCITY;
     sdo.dl_i8(id, 0x6060, 0, mode_value);
 
+    /* 14) CiA402 state-machine ramp: 6 -> 7 -> 0xF (operation enabled). */
     sdo.dl_u16(id, 0x6040, 0, 0x0006);
     vTaskDelay(pdMS_TO_TICKS(10));
     sdo.dl_u16(id, 0x6040, 0, 0x0007);
@@ -228,7 +254,8 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
     sdo.dl_u16(id, 0x6040, 0, 0x000F);
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    if (!sendNmt(driver, HEXFELLOW_NMT_OPERATIONAL, id)) {
+    /* 15) NMT -> Operational so PDOs start flowing. */
+    if (!sendNmt(driver, NMT_OPERATIONAL, id)) {
         return false;
     }
 
@@ -237,15 +264,16 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
 
 bool HexfellowMotorController::init(co_master_sdo& sdo, Esp32CanFdDriver& driver)
 {
-    if (runtime_set_.count == 0 || runtime_set_.count > HEXFELLOW_MAX_MOTORS) {
+    if (runtime_set_.count == 0 || runtime_set_.count > MAX_MOTORS) {
         return false;
     }
-
+    /* Convention: CANopen IDs must start at 1 and be sequential. */
     for (uint8_t i = 0; i < runtime_set_.count; ++i) {
         runtime_set_.motors[i].node_id = static_cast<uint8_t>(i + 1);
     }
 
-    if (!sendNmt(driver, HEXFELLOW_NMT_PRE_OPERATIONAL, 0)) {
+    /* Stop everything first: broadcast pre-operational. */
+    if (!sendNmt(driver, NMT_PRE_OPERATIONAL, 0)) {
         return false;
     }
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -260,14 +288,14 @@ bool HexfellowMotorController::init(co_master_sdo& sdo, Esp32CanFdDriver& driver
 
 void HexfellowMotorController::setMitTarget(uint8_t index, const mit_target_t& target)
 {
-    if (index >= HEXFELLOW_MAX_MOTORS) return;
+    if (index >= MAX_MOTORS) return;
     std::lock_guard<std::mutex> lk(mutex_);
     mit_targets_[index] = target;
 }
 
 void HexfellowMotorController::setVelocityTarget(uint8_t index, float target_rev_s, uint16_t torque_permille)
 {
-    if (index >= HEXFELLOW_MAX_MOTORS) return;
+    if (index >= MAX_MOTORS) return;
     std::lock_guard<std::mutex> lk(mutex_);
     vel_target_rev_s_[index] = target_rev_s;
     vel_torque_permille_[index] = torque_permille;
@@ -275,8 +303,9 @@ void HexfellowMotorController::setVelocityTarget(uint8_t index, float target_rev
 
 void HexfellowMotorController::snapshot(uint8_t index, MotorState& out) const
 {
-    if (index >= HEXFELLOW_MAX_MOTORS) {
-        std::memset(&out, 0, sizeof(out));
+    if (index >= MAX_MOTORS) {
+        // memset(&out, 0, sizeof(out));
+        out = MotorState{};
         return;
     }
     std::lock_guard<std::mutex> lk(mutex_);
@@ -335,7 +364,7 @@ void HexfellowMotorController::handleRxFrame(bsp::canfd::Frame& frame)
     std::lock_guard<std::mutex> lk(mutex_);
     MotorState& s = state_[index];
 
-    if (base == HEXFELLOW_COB_TPDO1 && frame.dlc >= kTpdo1Len) {
+    if (base == OB_TPDO1 && frame.dlc >= kTpdo1Len) {
         float pos = 0.0f;
         std::memcpy(&pos, frame.data.data() + 0, 4);
         const uint32_t ts = static_cast<uint32_t>(frame.data[4]) |
@@ -355,7 +384,7 @@ void HexfellowMotorController::handleRxFrame(bsp::canfd::Frame& frame)
         s.error_code = err;
         s.last_tpdo1_ms = nowMs();
     }
-    else if (base == HEXFELLOW_COB_TPDO2 && frame.dlc >= kTpdo2Len) {
+    else if (base == COB_TPDO2 && frame.dlc >= kTpdo2Len) {
         const uint16_t status = static_cast<uint16_t>(frame.data[0]) |
                                 (static_cast<uint16_t>(frame.data[1]) << 8);
         const int16_t drv_t = static_cast<int16_t>(
@@ -373,4 +402,50 @@ void HexfellowMotorController::handleRxFrame(bsp::canfd::Frame& frame)
         s.control_word = ctrl;
         s.last_tpdo2_ms = nowMs();
     }
+}
+
+void HexfellowMotorController::hexfellow_mit_target_pack(const mit_target_t* t, const mit_mapping_t* m, uint8_t out[8])
+{
+    float position = clamp(t->position, m->position_min, m->position_max);
+    float velocity = clamp(t->velocity, m->velocity_min, m->velocity_max);
+    float torque   = clamp(t->torque,   m->torque_min,   m->torque_max);
+    float kp       = clamp(t->kp,       m->kp_min,       m->kp_max);
+    float kd       = clamp(t->kd,       m->kd_min,       m->kd_max);
+
+    uint32_t pos_u  = float_to_uint(position, m->position_min, m->position_max, 16);
+    uint32_t vel_u  = float_to_uint(velocity, m->velocity_min, m->velocity_max, 12);
+    uint32_t torq_u = float_to_uint(torque,   m->torque_min,   m->torque_max,   12);
+    uint32_t kp_u   = float_to_uint(kp,       m->kp_min,       m->kp_max,       12);
+    uint32_t kd_u   = float_to_uint(kd,       m->kd_min,       m->kd_max,       12);
+
+    uint32_t lower_u32 = torq_u | (kd_u << 12) | ((kp_u & 0xFFu) << 24);
+    uint32_t upper_u32 = (kp_u >> 8) | (vel_u << 4) | (pos_u << 16);
+
+    store_u32_le(out,     lower_u32);
+    store_u32_le(out + 4, upper_u32);
+}
+
+
+
+void HexfellowMotorController::mit_mapping_default(mit_mapping_t& mit_map) {
+    mit_map.position_min = -0.5f,  mit_map.position_max = 0.5f;
+    mit_map.velocity_min = -10.0f, mit_map.velocity_max = 10.0f;
+    mit_map.torque_min   = -10.0f, mit_map.torque_max   = 10.0f;
+    mit_map.kp_min       = 0.0f,   mit_map.kp_max       = 100.0f;
+    mit_map.kd_min       = 0.0f,   mit_map.kd_max       = 20.0f;
+}
+
+inline uint32_t HexfellowMotorController::float_to_uint(float x, float xmin, float xmax,
+                                                        uint32_t bits)
+{
+    float span = xmax - xmin;
+    float scale = (float)((1u << bits) - 1u);
+    return (uint32_t)(((x - xmin) * scale) / span);
+}
+
+inline void HexfellowMotorController::store_u32_le(uint8_t dst[4], uint32_t v) {
+    dst[0] = (uint8_t)(v & 0xFFu);
+    dst[1] = (uint8_t)((v >> 8) & 0xFFu);
+    dst[2] = (uint8_t)((v >> 16) & 0xFFu);
+    dst[3] = (uint8_t)((v >> 24) & 0xFFu);
 }

@@ -47,7 +47,7 @@ private:
 
     Config config_;
     twai_node_handle_t node_ = nullptr;
-    static constexpr uint32_t RX_RING_SIZE = 16;
+    static constexpr uint32_t RX_RING_SIZE = 32;
     atomic_array<bsp::canfd::Frame, RX_RING_SIZE> rx_buffer;
     //signal config define
     SignalContext RxReceive_cfg{};

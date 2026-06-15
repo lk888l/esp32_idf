@@ -36,7 +36,7 @@ bool Esp32CanFdDriver::init()
     node_cfg.data_timing.sp_permill = 750;
 
     node_cfg.fail_retry_cnt = 0;
-    node_cfg.tx_queue_depth = 10;
+    node_cfg.tx_queue_depth = 32;
     node_cfg.flags.enable_self_test = 0;
 
     esp_err_t err =
@@ -86,6 +86,15 @@ bool Esp32CanFdDriver::stop()
 
 bool Esp32CanFdDriver::send(const bsp::canfd::Frame& frame)
 {
+    // Validate DLC before passing to TWAI driver to avoid HAL assertion.
+    const uint8_t max_len = frame.fd_format ? 64 : 8;
+    if (frame.dlc == 0 || frame.dlc > max_len) {
+        ESP_LOGE("CANFD",
+                 "send: invalid dlc=%u (max=%u, fd=%d, id=0x%03lX)",
+                 frame.dlc, max_len, frame.fd_format, frame.id);
+        return false;
+    }
+
     twai_frame_t tx = {};
 
     tx.header.id = frame.id;
@@ -100,7 +109,7 @@ bool Esp32CanFdDriver::send(const bsp::canfd::Frame& frame)
         frame.bitrate_switch;
 
     tx.header.rtr = false;
-        
+
     tx.buffer =
         const_cast<uint8_t*>(
             frame.data.data());
@@ -114,7 +123,20 @@ bool Esp32CanFdDriver::send(const bsp::canfd::Frame& frame)
             &tx,
             pdMS_TO_TICKS(10));
 
-    return err == ESP_OK;
+    if (err != ESP_OK) {
+        return false;
+    }
+
+    // CRITICAL: twai_node_transmit queues &tx by pointer. If the hardware is
+    // busy, tx goes out of scope when send() returns, but the TWAI ISR still
+    // holds the dangling pointer. Wait until pending TX completes so tx stays
+    // alive until the HAL has finished reading buffer_len from it.
+    err = twai_node_transmit_wait_all_done(node_, pdMS_TO_TICKS(100));
+    if (err != ESP_OK) {
+        ESP_LOGW("CANFD", "send: tx wait timeout (id=0x%03lX)", frame.id);
+    }
+
+    return true;
 }
 
 bool Esp32CanFdDriver::push_rx_buffer( const bsp::canfd::Frame& frame)
@@ -190,5 +212,5 @@ bool Esp32CanFdDriver::on_rx_done(twai_node_handle_t node, const twai_rx_done_ev
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     self->emitFromISR(self->RxReceive_cfg,&xHigherPriorityTaskWoken);
 
-    return false;
+    return xHigherPriorityTaskWoken;
 }
