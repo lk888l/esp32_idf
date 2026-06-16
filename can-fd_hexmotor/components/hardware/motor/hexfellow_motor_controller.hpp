@@ -22,8 +22,8 @@ public:
     * default TPDO1 COB-ID (0x180 + 0x10). */
     constexpr static uint16_t HEXFELLOW_RPDO_COB_ID = 0x190u;
 
-    /* Maximum number of motors on a single CAN bus. CAN-FD frame data length
-    * is 64 bytes, so 8 motors * 8 bytes/motor = 64 bytes (MIT mode). */
+    /* Maximum number of motors on a single CAN bus. CAN-FD frame carries
+    * up to 64 bytes: 8 motors × 8 bytes/motor (fixed slot, any mode). */
     constexpr static uint8_t MAX_MOTORS = 8;
 
     /* Vendor / firmware checks (1018h identity object). */
@@ -82,13 +82,18 @@ public:
         float kd;           /* Nm*s/Rev */
     } mit_target_t;
 
-    struct Config
+    struct MotorConfig
     {
         mode_kind_t mode{HEXFELLOW_MODE_KIND_MIT};
+        uint16_t torque_permille{0};           // 6072h
+        uint16_t kp_kd_torque_permille{0};     // 2004h-0E, MIT only
+        mit_mapping_t mapping{};               // MIT only
+    };
+
+    struct Config
+    {
         uint8_t  count{0};                         // 1..MAX_MOTORS
-        uint16_t torque_permille{0};               // 6072h
-        uint16_t kp_kd_torque_permille{0};         // 2004h-0E, MIT only
-        mit_mapping_t cfg_mapping{};         // MIT only
+        MotorConfig motors[MAX_MOTORS]{};           // per-motor config
     };
 
     struct MotorState
@@ -110,23 +115,23 @@ public:
 
 
 
-    /* Per-motor information learned during initialization. */
-    typedef struct {
-        uint8_t  node_id;            /* CANopen ID, 1..N */
-        uint32_t firmware_version;   /* from 1018h-03 */
-        uint32_t serial_number;      /* from 1018h-04 */
-        float    peak_torque_mNm;    /* from 6076h (REAL32, mNm) */
-    } motor_runtime_t;
-
+    /* Per-motor runtime information (config copy + learned during init). */
     typedef struct {
         mode_kind_t mode;
-        uint8_t               count;
-        uint16_t              torque_permille;
-        uint16_t              kp_kd_torque_permille;
-        uint16_t              mapping_placeholder; 
+        uint16_t    torque_permille;
+        uint16_t    kp_kd_torque_permille;
         mit_mapping_t mapping;             /* MIT only */
-        motor_runtime_t motors[MAX_MOTORS];
-    } hexfellow_motor_set_t; 
+        /* --- learned during initialization --- */
+        uint8_t     node_id;               /* CANopen ID, 1..N */
+        uint32_t    firmware_version;      /* from 1018h-03 */
+        uint32_t    serial_number;         /* from 1018h-04 */
+        float       peak_torque_mNm;       /* from 6076h (REAL32, mNm) */
+    } per_motor_runtime_t;
+
+    typedef struct {
+        uint8_t count;
+        per_motor_runtime_t motors[MAX_MOTORS];
+    } hexfellow_motor_set_t;
     /*----------------   hex motor configure type   ----------------*/ 
 
 
@@ -147,7 +152,7 @@ public:
     void handleRxFrame(bsp::canfd::Frame& frame);
 
     uint8_t count() const { return set_.count; }
-    mode_kind_t mode() const { return set_.mode; }
+    mode_kind_t mode(uint8_t index) const { return runtime_set_.motors[index].mode; }
 
     /**
      * @brief 
@@ -180,8 +185,7 @@ private:
     void configureTpdo2(co_master_sdo& sdo, uint8_t node_id) const;
     void rpdoDisable(co_master_sdo& sdo, uint8_t node_id) const;
     void rpdoEnable(co_master_sdo& sdo, uint8_t node_id) const;
-    void rpdoMapMit(co_master_sdo& sdo, uint8_t node_id, uint8_t index, uint8_t total) const;
-    void rpdoMapVelocity(co_master_sdo& sdo, uint8_t node_id, uint8_t index, uint8_t total) const;
+    void rpdoMapMotor(co_master_sdo& sdo, uint8_t node_id, uint8_t index, uint8_t total) const;
 
 private:
     Config set_{};

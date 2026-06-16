@@ -8,7 +8,7 @@ class co_master_sdo {
 
     public:
         co_master_sdo(ICanDriver& can_driver, uint32_t notifyBit) : can_driver_(can_driver), notification_bit_(notifyBit) {};
-        ~co_master_sdo();
+        ~co_master_sdo() = default;
 
         /**
          * @brief CANopen SDO 状态/错误码

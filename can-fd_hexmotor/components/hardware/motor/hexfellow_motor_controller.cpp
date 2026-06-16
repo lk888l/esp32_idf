@@ -13,11 +13,13 @@ HexfellowMotorController::HexfellowMotorController(const Config& cfg)
     : set_(cfg)
 {
     std::memset(&runtime_set_, 0, sizeof(runtime_set_));
-    runtime_set_.mode = cfg.mode;
     runtime_set_.count = cfg.count;
-    runtime_set_.torque_permille = cfg.torque_permille;
-    runtime_set_.kp_kd_torque_permille = cfg.kp_kd_torque_permille;
-    runtime_set_.mapping = cfg.cfg_mapping;
+    for (uint8_t i = 0; i < cfg.count; ++i) {
+        runtime_set_.motors[i].mode = cfg.motors[i].mode;
+        runtime_set_.motors[i].torque_permille = cfg.motors[i].torque_permille;
+        runtime_set_.motors[i].kp_kd_torque_permille = cfg.motors[i].kp_kd_torque_permille;
+        runtime_set_.motors[i].mapping = cfg.motors[i].mapping;
+    }
 }
 
 
@@ -108,38 +110,65 @@ constexpr static uint32_t od_entry(uint16_t index, uint8_t sub, uint8_t bitlen)
 static constexpr uint32_t PAD_U32 = od_entry(0x3000, 0x03, 0x20);
 static constexpr uint32_t PAD_U16 = od_entry(0x3000, 0x02, 0x10);
 
-void HexfellowMotorController::rpdoMapMit(co_master_sdo& sdo, uint8_t id, uint8_t index, uint8_t total) const
+void HexfellowMotorController::rpdoMapMotor(co_master_sdo& sdo, uint8_t id, uint8_t index, uint8_t total) const
 {
-    sdo.dl_u8(id, 0x1600, 0, 0);
+    /* Per-motor byte size:
+     *   MIT:      8 bytes (2004h/02 + 2004h/03)
+     *   Velocity: 6 bytes (6072h U16 + 60FFh U32, no mid-slot padding)
+     * Frame is packed sequentially; each motor maps its own data at its
+     * computed offset and pads the rest. */
+    constexpr uint8_t MIT_SLOT = 8;
+    constexpr uint8_t VEL_SLOT = 6;
 
-    uint8_t sub = 1;
+    uint8_t sizes[MAX_MOTORS];
+    uint8_t frame_size = 0;
     for (uint8_t i = 0; i < total; ++i) {
-        if (i == index) {
-            sdo.dl_u32(id, 0x1600, sub++, od_entry(0x2004, 0x02, 0x20));
-            sdo.dl_u32(id, 0x1600, sub++, od_entry(0x2004, 0x03, 0x20));
-        } else {
-            sdo.dl_u32(id, 0x1600, sub++, PAD_U32);
-            sdo.dl_u32(id, 0x1600, sub++, PAD_U32);
-        }
+        sizes[i] = (runtime_set_.motors[i].mode == HEXFELLOW_MODE_KIND_MIT) ? MIT_SLOT : VEL_SLOT;
+        frame_size += sizes[i];
     }
-    sdo.dl_u8(id, 0x1600, 0, static_cast<uint8_t>(total * 2));
-}
 
-void HexfellowMotorController::rpdoMapVelocity(co_master_sdo& sdo, uint8_t id, uint8_t index, uint8_t total) const
-{
+    /* Offset of this motor's data within the frame */
+    uint8_t offset = 0;
+    for (uint8_t i = 0; i < index; ++i) {
+        offset += sizes[i];
+    }
+    const uint8_t data_size = sizes[index];
+
     sdo.dl_u8(id, 0x1600, 0, 0);
-
     uint8_t sub = 1;
-    for (uint8_t i = 0; i < total; ++i) {
-        if (i == index) {
-            sdo.dl_u32(id, 0x1600, sub++, od_entry(0x6072, 0x00, 0x10));
-            sdo.dl_u32(id, 0x1600, sub++, od_entry(0x60FF, 0x00, 0x20));
-        } else {
-            sdo.dl_u32(id, 0x1600, sub++, PAD_U16);
-            sdo.dl_u32(id, 0x1600, sub++, PAD_U32);
-        }
+
+    /* --- padding before this motor's data (skip preceding motors) --- */
+    uint8_t pad = offset;
+    while (pad >= 4) {
+        sdo.dl_u32(id, 0x1600, sub++, PAD_U32);
+        pad -= 4;
     }
-    sdo.dl_u8(id, 0x1600, 0, static_cast<uint8_t>(total * 2));
+    if (pad >= 2) {
+        sdo.dl_u32(id, 0x1600, sub++, PAD_U16);
+        pad -= 2;
+    }
+
+    /* --- this motor's data --- */
+    if (runtime_set_.motors[index].mode == HEXFELLOW_MODE_KIND_MIT) {
+        sdo.dl_u32(id, 0x1600, sub++, od_entry(0x2004, 0x02, 0x20));
+        sdo.dl_u32(id, 0x1600, sub++, od_entry(0x2004, 0x03, 0x20));
+    } else {
+        sdo.dl_u32(id, 0x1600, sub++, od_entry(0x6072, 0x00, 0x10));
+        sdo.dl_u32(id, 0x1600, sub++, od_entry(0x60FF, 0x00, 0x20));
+    }
+
+    /* --- padding after this motor's data (skip subsequent motors) --- */
+    pad = frame_size - offset - data_size;
+    while (pad >= 4) {
+        sdo.dl_u32(id, 0x1600, sub++, PAD_U32);
+        pad -= 4;
+    }
+    if (pad >= 2) {
+        sdo.dl_u32(id, 0x1600, sub++, PAD_U16);
+        pad -= 2;
+    }
+
+    sdo.dl_u8(id, 0x1600, 0, static_cast<uint8_t>(sub - 1));
 }
 
 bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver& driver, uint8_t index)
@@ -187,12 +216,12 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
     /* 7) Short-circuit-brake on disable. */
     sdo.dl_u8(id, 0x2040, 0, 1);
     /* 8) Per-mode max-torque (6072h). */
-    sdo.dl_u16(id, 0x6072, 0, runtime_set_.torque_permille);
+    sdo.dl_u16(id, 0x6072, 0, runtime_set_.motors[index].torque_permille);
 
     /* 9) MIT-specific: KP/KD output torque limit and target ranges. */
-    if (runtime_set_.mode == HEXFELLOW_MODE_KIND_MIT) {
-        const auto& m = runtime_set_.mapping;
-        sdo.dl_u16(id, 0x2004, 0x0E, runtime_set_.kp_kd_torque_permille);
+    if (runtime_set_.motors[index].mode == HEXFELLOW_MODE_KIND_MIT) {
+        const auto& m = runtime_set_.motors[index].mapping;
+        sdo.dl_u16(id, 0x2004, 0x0E, runtime_set_.motors[index].kp_kd_torque_permille);
         sdo.dl_f32(id, 0x2004, 0x04, m.position_min);
         sdo.dl_f32(id, 0x2004, 0x05, m.position_max);
         sdo.dl_f32(id, 0x2004, 0x06, m.velocity_min);
@@ -226,13 +255,9 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
     configureTpdo1(sdo, id);
     configureTpdo2(sdo, id);
 
-    /* 11) RPDO1: shared 0x190 + per-motor mapping. */
+    /* 11) RPDO1: shared 0x190 + per-motor mapping (fixed 8-byte slot). */
     rpdoDisable(sdo, id);
-    if (runtime_set_.mode == HEXFELLOW_MODE_KIND_MIT) {
-        rpdoMapMit(sdo, id, index, runtime_set_.count);
-    } else {
-        rpdoMapVelocity(sdo, id, index, runtime_set_.count);
-    }
+    rpdoMapMotor(sdo, id, index, runtime_set_.count);
     rpdoEnable(sdo, id);
 
     /* 12) Re-enable consumer-heartbeat monitoring of the master. */
@@ -241,7 +266,7 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
     sdo.dl_u32(id, 0x1016, 1, hb);
 
     /* 13) Mode of operation (MIT=5, Profile Velocity=3). */
-    const int8_t mode_value = (runtime_set_.mode == HEXFELLOW_MODE_KIND_MIT)
+    const int8_t mode_value = (runtime_set_.motors[index].mode == HEXFELLOW_MODE_KIND_MIT)
                                 ? MODE_MIT
                                 : MODE_PROFILE_VELOCITY;
     sdo.dl_i8(id, 0x6060, 0, mode_value);
@@ -289,6 +314,7 @@ bool HexfellowMotorController::init(co_master_sdo& sdo, Esp32CanFdDriver& driver
 void HexfellowMotorController::setMitTarget(uint8_t index, const mit_target_t& target)
 {
     if (index >= MAX_MOTORS) return;
+    if (runtime_set_.motors[index].mode != HEXFELLOW_MODE_KIND_MIT) return;
     std::lock_guard<std::mutex> lk(mutex_);
     mit_targets_[index] = target;
 }
@@ -296,6 +322,7 @@ void HexfellowMotorController::setMitTarget(uint8_t index, const mit_target_t& t
 void HexfellowMotorController::setVelocityTarget(uint8_t index, float target_rev_s, uint16_t torque_permille)
 {
     if (index >= MAX_MOTORS) return;
+    if (runtime_set_.motors[index].mode != HEXFELLOW_MODE_KIND_VELOCITY) return;
     std::lock_guard<std::mutex> lk(mutex_);
     vel_target_rev_s_[index] = target_rev_s;
     vel_torque_permille_[index] = torque_permille;
@@ -330,23 +357,24 @@ bool HexfellowMotorController::buildRpdoFrame(bsp::canfd::Frame& out) const
     out.bitrate_switch = true;
 
     const uint8_t cnt = runtime_set_.count;
-    if (runtime_set_.mode == HEXFELLOW_MODE_KIND_MIT) {
-        out.dlc = static_cast<uint8_t>(cnt * 8);
-        for (uint8_t i = 0; i < cnt; ++i) {
-            hexfellow_mit_target_pack(&mit_targets_[i], &runtime_set_.mapping,
-                                      &out.data[i * 8]);
-        }
-    } else {
-        out.dlc = static_cast<uint8_t>(cnt * 6);
-        for (uint8_t i = 0; i < cnt; ++i) {
-            uint8_t* p = &out.data[i * 6];
+    /* Packed sequential layout (no per-motor fixed-size slots):
+     *   MIT:      8 bytes (packed mit_target_t)
+     *   Velocity: 2 bytes torque_permille + 4 bytes target_vel = 6 bytes */
+    uint8_t pos = 0;
+    for (uint8_t i = 0; i < cnt; ++i) {
+        if (runtime_set_.motors[i].mode == HEXFELLOW_MODE_KIND_MIT) {
+            hexfellow_mit_target_pack(&mit_targets_[i], &runtime_set_.motors[i].mapping, &out.data[pos]);
+            pos += 8;
+        } else {
             const uint16_t torque = vel_torque_permille_[i];
             const float target = vel_target_rev_s_[i];
-            p[0] = static_cast<uint8_t>(torque & 0xFF);
-            p[1] = static_cast<uint8_t>((torque >> 8) & 0xFF);
-            std::memcpy(&p[2], &target, sizeof(float));
+            out.data[pos]     = static_cast<uint8_t>(torque & 0xFF);
+            out.data[pos + 1] = static_cast<uint8_t>((torque >> 8) & 0xFF);
+            std::memcpy(&out.data[pos + 2], &target, sizeof(float));
+            pos += 6;
         }
     }
+    out.dlc = pos;
     return true;
 }
 

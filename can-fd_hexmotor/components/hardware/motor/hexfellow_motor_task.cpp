@@ -5,20 +5,20 @@
 HexfellowMotorTask::HexfellowMotorTask(const std::string& name,
                                        uint32_t stack_size,
                                        UBaseType_t priority,
-                                       co_master_sdo& sdo,
                                        Esp32CanFdDriver& driver,
                                        const HexfellowMotorController::Config& cfg,
                                        BaseType_t core)
-    : AppTask(name, stack_size, priority, core),
-      sdo_(sdo),
-      driver_(driver),
-      controller_(cfg)
+        : AppTask(name, stack_size, priority, core),
+        driver_(driver),
+        controller_(cfg)
 {
+    sdo_.emplace(driver,SDO_CAN_RX_NOTIFY_BIT);
 }
 
 bool HexfellowMotorTask::initMotors()
 {
-    initialized_ = controller_.init(sdo_, driver_);
+
+    initialized_ = controller_.init(*sdo_, driver_);
     return initialized_;
 }
 
@@ -46,10 +46,10 @@ void HexfellowMotorTask::main()
      */
     driver_.bindReactor(&Esp32CanFdDriver::signal_RxComplete,
                         xTaskGetCurrentTaskHandle(),
-                        sdo_.get_notification_bit());
+                        sdo_->get_notification_bit());
 
     if (!initialized_) {
-        if (!controller_.init(sdo_, driver_)) {
+        if (!controller_.init(*sdo_, driver_)) {
             return;
         }
         initialized_ = true;

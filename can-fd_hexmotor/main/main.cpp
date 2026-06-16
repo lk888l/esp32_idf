@@ -109,39 +109,34 @@ extern "C" void app_main(void)
         logger.info("Failed to start CAN driver");
         return;
     }
-    /// define sdo drive
-    // TODO: This way task random make a bitmask.
-    constexpr uint32_t CAN_RX_NOTIFY_BIT = (1 << 2);
-    // bind the CAN receive signal to the reactor with this task's handle and a unique bitmask.
-    // can_driver.bindReactor(&Esp32CanFdDriver::signal_RxComplete, xTaskGetCurrentTaskHandle(), CAN_RX_NOTIFY_BIT);
+    
+    /// define hexmotor_control task
     // Create a CANopen SDO master instance using the CAN driver and the same notification bit for synchronization
-    co_master_sdo sdo(can_driver, CAN_RX_NOTIFY_BIT);
     HexfellowMotorController::Config cfg;
     cfg.count = 1;
-    cfg.torque_permille = 300, cfg.kp_kd_torque_permille = 770;
-    HexfellowMotorController::mit_mapping_default(cfg.cfg_mapping);
-
-    HexfellowMotorTask hexmotor_task(HEXMOTOR, 8192, 8, sdo, can_driver, cfg);
+    // 0号电机，默认MIT模式
+    cfg.motors[0].mode = HexfellowMotorController::HEXFELLOW_MODE_KIND_MIT;
+    cfg.motors[0].torque_permille = 300;
+    cfg.motors[0].kp_kd_torque_permille = 770;
+    HexfellowMotorController::mit_mapping_default(cfg.motors[0].mapping);
+    // 电机1: 速度模式
+    cfg.motors[1].mode = HexfellowMotorController::HEXFELLOW_MODE_KIND_VELOCITY;
+    cfg.motors[1].torque_permille = 300;   // 速度模式的最大扭矩限制
+    // Create an instance of the motor control task
+    HexfellowMotorTask hexmotor_task(HEXMOTOR, 8192, 8, can_driver, cfg);
+    // 设置运行目标
+    // 设置电机0运行模式
     HexfellowMotorController::mit_target_t target{};
     target.position = 0.0f;
     target.velocity = 1.0f;
     target.kp = 0.0f;
-    target.kd = 2.0f;
+    target.kd = 1.0f;
     target.torque = 0.0f;
     hexmotor_task.setMitTarget(0,target);
+    // 设置电机1 速度目标（target_rev_s=5.0 rps, torque_permille=200）
+    hexmotor_task.setVelocityTarget(1, 2.0f, 200);
     if(!hexmotor_task.start()) {ESP_LOGE(TAG, "Initialization hexmotor task fail.");}
     // Create a task for the reactor function
-    // BaseType_t xReturn = pdPASS;
-    // xReturn = xTaskCreate((TaskFunction_t)ReactorFunc,
-    //                     (const char*)"Reactor",
-    //                     4096,
-    //                     (void*)NULL,
-    //                     (UBaseType_t)8,
-    //                     (TaskHandle_t*)&Handle_ReactorFunc);
-    // if (xReturn != pdPASS) {
-    //     logger.info("Failed to create reactor task");
-    //     return;
-    // }
     // Create a task for the motor control function
     // BaseType_t xReturn = pdPASS;
     // xReturn = xTaskCreate((TaskFunction_t)Motor_Control_Task,
@@ -169,6 +164,14 @@ extern "C" void app_main(void)
         static int LED_State = 0;
         LED_State = !LED_State;
         gpio_set_level(GPIO_NUM_25, LED_State); // Toggle GPIO25 to show activity
-        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        HexfellowMotorController::MotorState state;
+        hexmotor_task.snapshot(0, state);
+        ESP_LOGI("motor", "pos=%.3f rev, torque=%d ‰, temp=%d.%d°C",
+            state.position_rev,
+            state.raw_torque_permille,
+            state.motor_temp_x10 / 10, state.motor_temp_x10 % 10);
+
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
