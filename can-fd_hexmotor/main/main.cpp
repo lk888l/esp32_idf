@@ -1,5 +1,4 @@
 // main.cpp - minimal C++ entry for ESP-IDF template
-#include <string>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -7,6 +6,7 @@
 
 //user C++ library include
 #include "logger.hpp"
+#include "uart_dma_driver.hpp"
 #include "canfd_driver.hpp"
 #include "TaskReactor.hpp"
 #include "canopen/canopen_sdo.hpp"
@@ -20,19 +20,49 @@ static const std::string HEXMOTOR    = "Motor_task";
 //freeRTOS task handle
 TaskHandle_t Handle_ReactorFunc = nullptr;
 TaskHandle_t Handle_MotorControlFunc = nullptr;
+TaskHandle_t Handle_UartRxFunc = nullptr;
 TaskReactor reactor(Handle_ReactorFunc);
-
-// Hardware driver instances
-
-
 /********** global variable define end       **********/
 
+/**
+ * @brief UART RX task — blocks on the native UART event queue,
+ *        drains available data as null-terminated strings and logs them.
+ */
+void UartRxTask(void* pvParameters) {
+    auto* uart = static_cast<Esp32UartDmaDriver*>(pvParameters);
+    uart_event_t event;
+    espidf_template::Logger rx_log("UART_RX");
 
-void ReactorFunc(void* pvParameters){
-    
-    reactor.taskLoop();
-    vTaskDelete(NULL); // 防止意外退出导致 crash
+    while (true) {
+        if (xQueueReceive(uart->event_queue(), &event, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        switch (event.type) {
+        case UART_DATA:
+            uart->drainLines([&](const char* line) { rx_log.info("{}", line); });
+            break;
+
+        case UART_FIFO_OVF:
+            ESP_LOGW(TAG, "UART RX FIFO overflow");
+            uart_flush_input(UART_NUM_0);
+            break;
+
+        case UART_BUFFER_FULL:
+            ESP_LOGW(TAG, "UART RX buffer full");
+            break;
+
+        case UART_BREAK:
+            ESP_LOGI(TAG, "UART break signal");
+            break;
+
+        default:
+            break;
+        }
+    }
 }
+
+
 
 /**
  * @brief Motor control task
@@ -91,8 +121,36 @@ void Motor_Control_Task(void* pvParameters){
 
 extern "C" void app_main(void)
 {
+    // ──────────── 1. Initialise DMA-UART logger ────────────
+    Esp32UartDmaDriver::Config uart_cfg = {};
+    uart_cfg.uart_num = UART_NUM_0;
+    uart_cfg.tx_pin   = GPIO_NUM_11;         // TX only for logging
+    uart_cfg.rx_pin   = GPIO_NUM_12;          // RX for incoming commands / data
+    uart_cfg.baudrate = 115200;              // 
+    Esp32UartDmaDriver uart_drv(uart_cfg);
+
+    if (!uart_drv.init() || !uart_drv.start()) {
+        // Fallback: still on default UART0 console
+        ESP_LOGE(TAG, "DMA-UART init failed, logging to default console");
+    } else {
+        espidf_template::Logger::setUart(&uart_drv);
+        esp_log_set_vprintf(&espidf_template::Logger::vprintfHook);
+
+        // Create UART RX task — reads incoming data and logs complete lines
+        BaseType_t ret = xTaskCreate(UartRxTask,
+                                     "uart_rx",
+                                     2560,
+                                     &uart_drv,
+                                     10,
+                                     &Handle_UartRxFunc);
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create UART RX task");
+        }
+    }
+
+    // ──────────── 2. Business logic ────────────────────────
     espidf_template::Logger logger(TAG);
-    logger.info("ESP-IDF C++ template running");
+    logger.info("ESP-IDF running hexmotor control.");
 
     /// define Esp32CanFdDriver
     Esp32CanFdDriver::Config can_cfg = {};
@@ -160,14 +218,48 @@ extern "C" void app_main(void)
     io_conf.intr_type = GPIO_INTR_DISABLE;
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
+    // 速度渐变参数
+    float motor0_velocity = 0.0f;           // 当前目标速度 (Rev/s)
+    constexpr float kMaxVelocity = 3.0f;   // 最高速度 (Rev/s)
+    constexpr float kStep = 0.5f;           // 每500ms速度变化步长 (Rev/s)
+    bool accelerating = true;               // 加速/减速方向
+
     while (true) {
         static int LED_State = 0;
         LED_State = !LED_State;
         gpio_set_level(GPIO_NUM_25, LED_State); // Toggle GPIO25 to show activity
 
+        // 渐变加减速逻辑
+        if (accelerating) {
+            motor0_velocity += kStep;
+            if (motor0_velocity >= kMaxVelocity) {
+                motor0_velocity = kMaxVelocity;
+                accelerating = false;       // 到达最高速，开始减速
+            }
+        } else {
+            motor0_velocity -= kStep;
+            if (motor0_velocity <= 0.0f) {
+                motor0_velocity = 0.0f;
+                accelerating = true;        // 降到最低速，开始加速
+            }
+        }
+
+        // 更新0号电机MIT目标速度
+        HexfellowMotorController::mit_target_t target{};
+        target.position = 0.0f;
+        target.velocity = motor0_velocity;
+        target.kp = 0.0f;
+        target.kd = 0.6f;
+        target.torque = 0.0f;
+        hexmotor_task.setMitTarget(0, target);
+
         HexfellowMotorController::MotorState state;
         hexmotor_task.snapshot(0, state);
-        ESP_LOGI("motor", "pos=%.3f rev, torque=%d ‰, temp=%d.%d°C",
+
+        // std::format-style logger (direct API, type-safe)
+        espidf_template::Logger motor_log("motor");
+        motor_log.info("target_vel={:.1f} rps, pos={:.3f} rev, torque={} ‰, temp={}.{}°C",
+            motor0_velocity,
             state.position_rev,
             state.raw_torque_permille,
             state.motor_temp_x10 / 10, state.motor_temp_x10 % 10);

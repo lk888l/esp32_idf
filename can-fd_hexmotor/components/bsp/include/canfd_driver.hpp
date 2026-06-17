@@ -1,34 +1,18 @@
 #pragma once
 
 /// cpp standard library headers
-#include <functional>
-#include <array>
 #include <atomic>
 #include <memory>
 
 /// Forward declaration of ESP-IDF TWAI types
 #include "canfd_frame.hpp"
 #include "atomic_array.hpp"
-#include "BasicObject.hpp"
 
 /// Forward declaration of ESP-IDF TWAI types
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
 
-class ICanDriver : public BasicObject
-{
-public:
-    virtual ~ICanDriver() = default;
 
-    virtual bool init() = 0;
-
-    virtual bool start() = 0;
-
-    virtual bool stop() = 0;
-
-    virtual bool send(const bsp::canfd::Frame& frame) = 0;
-    virtual void signal_RxComplete(std::function<void(bsp::canfd::Frame&)> slot) = 0;
-};
 
 class Esp32CanFdDriver : public ICanDriver
 {
