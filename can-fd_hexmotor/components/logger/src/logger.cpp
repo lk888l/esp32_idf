@@ -8,12 +8,12 @@
 
 namespace espidf_template {
 
-// ── static member definitions ──────────────────────────────
+// ── static member definitions ──────────────────────────────────
 IUartDriver* Logger::s_uart_          = nullptr;
 LogLevel     Logger::s_global_level_  = LogLevel::INFO;
 std::mutex   Logger::s_write_mutex_;
 
-// ── helpers ────────────────────────────────────────────────
+// ── helpers ────────────────────────────────────────────────────
 
 const char* Logger::levelChar(LogLevel lv)
 {
@@ -27,7 +27,7 @@ const char* Logger::levelChar(LogLevel lv)
     }
 }
 
-// ── static setup ───────────────────────────────────────────
+// ── static setup ───────────────────────────────────────────────
 
 void Logger::setUart(IUartDriver* uart)
 {
@@ -35,7 +35,7 @@ void Logger::setUart(IUartDriver* uart)
     s_uart_ = uart;
 }
 
-// ── output core ────────────────────────────────────────────
+// ── output core ────────────────────────────────────────────────
 
 void Logger::writeImpl(LogLevel level, std::string_view msg)
 {
@@ -54,22 +54,20 @@ void Logger::writeImpl(LogLevel level, std::string_view msg)
     s_uart_->write(reinterpret_cast<const uint8_t*>("\r\n"), 2);
 }
 
-// ── vprintf hook (for esp_log_set_vprintf) ─────────────────
+// ── vprintf hook (for esp_log_set_vprintf) ─────────────────────
 
 int Logger::vprintfHook(const char* fmt, va_list args)
 {
-    // No lock here – esp_log_writev already serialises.
-    // Stack buffer avoids heap allocation on the hot path.
-    char buf[256];
+    // No lock here — esp_log_writev already serialises upstream.
+    // s_uart_ is treated as read-only after setUart() at boot, so this
+    // is safe without a mutex on the hot path.
+
+    char buf[256];                     // stack buffer — no heap allocation
     int  len = vsnprintf(buf, sizeof(buf), fmt, args);
     if (len <= 0) return 0;
 
     size_t n = std::min(static_cast<size_t>(len), sizeof(buf) - 1);
 
-    // Route through the same UART channel.
-    // s_uart_ access racy?  In practice setUart() is called once at boot
-    // before any task starts logging, so this is safe without a lock on
-    // the hot path.  If dynamic re-assignment is required, add the mutex.
     if (s_uart_) {
         s_uart_->write(reinterpret_cast<const uint8_t*>(buf), n);
     }

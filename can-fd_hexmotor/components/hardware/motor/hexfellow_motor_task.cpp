@@ -13,6 +13,8 @@ HexfellowMotorTask::HexfellowMotorTask(const std::string& name,
         controller_(cfg)
 {
     sdo_.emplace(driver,SDO_CAN_RX_NOTIFY_BIT);
+    init_semaphore_ = xSemaphoreCreateBinary();
+    // Binary semaphore starts at 0; will be given when motor init completes.
 }
 
 bool HexfellowMotorTask::initMotors()
@@ -50,10 +52,14 @@ void HexfellowMotorTask::main()
 
     if (!initialized_) {
         if (!controller_.init(*sdo_, driver_)) {
+            // init_semaphore_ stays 0 → waitForInit() in app_main will time out
             return;
         }
         initialized_ = true;
     }
+
+    // Signal app_main that motor CANopen init completed successfully.
+    xSemaphoreGive(init_semaphore_);
 
     const TickType_t hb_period_ticks = pdMS_TO_TICKS(HexfellowMotorController::MASTER_HB_PERIOD_MS);
     TickType_t hb_last = xTaskGetTickCount();
@@ -96,4 +102,20 @@ void HexfellowMotorTask::main()
 
         vTaskDelayUntil(&last_wake, period_ticks);
     }
+}
+
+void HexfellowMotorTask::cleanup()
+{
+    if (init_semaphore_ != nullptr) {
+        vSemaphoreDelete(init_semaphore_);
+        init_semaphore_ = nullptr;
+    }
+}
+
+bool HexfellowMotorTask::waitForInit(uint32_t timeout_ms) const
+{
+    if (init_semaphore_ == nullptr) {
+        return false;
+    }
+    return xSemaphoreTake(init_semaphore_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }

@@ -155,9 +155,10 @@ public:
     template<typename T>
     static bool parseStrArg(std::string_view &str_arg,T& value){
         // 1. 跳过前导空格
-//        size_t first = str_arg.find_first_not_of(' ');
-////        if (first == std::string_view::npos) return false;
-////        str_arg.remove_prefix(first);
+        size_t first = str_arg.find_first_not_of(' ');
+        if (first == std::string_view::npos) return false;
+        str_arg.remove_prefix(first);
+
         size_t last = str_arg.find(' ');
         std::string_view token = str_arg.substr(0, last);
         auto result = std::from_chars(token.data(), token.data() + token.size(), value);

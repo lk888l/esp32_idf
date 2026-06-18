@@ -33,7 +33,7 @@ public:
 
     /* Heartbeat parameters. */
     constexpr static uint8_t MASTER_HB_PERIOD_MS  =  50u;
-    constexpr static uint8_t MOTOR_HB_TIMEOUT_MS  =  250u;
+    constexpr static uint16_t MOTOR_HB_TIMEOUT_MS  =  500u;
 
     /* CiA301 default COB-IDs */
     constexpr static uint16_t COB_NMT = 0x000u;
