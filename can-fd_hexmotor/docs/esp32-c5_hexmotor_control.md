@@ -155,7 +155,7 @@ CAN-FD 帧 (最大 64 字节, 顺序紧凑排列):
 └──────────────┴────────────────┴─────┘
 ```
 
-**OD entry 编码:** `(index << 16) | (sub << 8) | bitlen`
+**OD entry 编码（PDO映射部分）:** `(index << 16) | (sub << 8) | bitlen`
 
 Padding 对象：
 | Padding | OD entry 值 | 说明 |
@@ -428,15 +428,27 @@ uint_value = (float_value - min) × (2^bits - 1) / (max - min)
 16. NMT → Operational                (PDO 开始传输)
 ```
 
+所有电机初始化完成后，`HexfellowMotorTask::main()` 通过二进制信号量 (`init_semaphore_`) 通知 `app_main`：
+- `app_main` 在调用 `hexmotor_task.start()` 后立即 `waitForInit(1500)` 阻塞等待
+- 若 1500ms 内未收到信号量（初始化失败或超时），`app_main` 输出错误并退出主循环
+- 初始化成功则进入事件驱动主循环
+
 ---
 
 ## 8. 运行时控制环路
 
-### 8.1 主循环
+### 8.1 控制任务主循环
 
-`HexfellowMotorTask::main()`  以 1ms 周期运行：
+`HexfellowMotorTask::main()` 以 1ms 周期运行，启动时先执行 CANopen 初始化并通知 `app_main`：
 
 ```
+启动:
+  ├── 重绑定 CAN RX 信号到本任务句柄 (SDO 操作需要)
+  ├── controller_.init(sdo, driver)  — CANopen SDO 初始化所有电机
+  ├── xSemaphoreGive(init_semaphore_) — 通知 app_main 初始化完成
+  └── 进入 1ms 定时循环
+
+1ms 定时循环:
 ┌──────────────────────────────────────────┐
 │           1ms 定时循环                    │
 │                                          │
@@ -454,16 +466,25 @@ uint_value = (float_value - min) × (2^bits - 1) / (max - min)
 │  │  - TPDO2: 状态/温度/控制字       │    │
 │  └──────────────────────────────────┘    │
 └──────────────────────────────────────────┘
+
+app_main 主循环 (事件驱动):
+┌──────────────────────────────────────────┐
+│  ulTaskNotifyTake(500ms)                 │
+│    ├── 有 spd 命令 → 更新电机 0 速度     │
+│    └── 超时 → 继续循环                   │
+│  hexmotor_task.setMitTarget(0, target)   │
+│  hexmotor_task.snapshot(0, state)        │
+│  日志输出电机状态                         │
+└──────────────────────────────────────────┘
 ```
 
 ### 8.2 线程安全
 
-所有共享状态访问通过 `std::mutex` 保护：
-
-- `setMitTarget()` / `setVelocityTarget()` — 用户线程写入目标值
+**电机控制路径（`std::mutex` 保护）：**
+- `setMitTarget()` / `setVelocityTarget()` — app_main 写入目标值
 - `buildRpdoFrame()` — 控制线程读取目标值构建 RPDO
 - `handleRxFrame()` — 控制线程更新 MotorState
-- `snapshot()` — 用户线程读取 MotorState
+- `snapshot()` — app_main 读取 MotorState
 
 ---
 

@@ -1,11 +1,11 @@
 idf_component_register(
     SRCS
-    "src/canfd_driver.cpp"    
-    "src/canfd_worker.cpp"                
-    INCLUDE_DIRS 
+    "src/canfd_driver.cpp"
+    "src/uart_dma_driver.cpp"
+    INCLUDE_DIRS
         "include"
-    REQUIRES 
-        logger
+    REQUIRES
+        esp_driver_uart
         esp_driver_twai
         base
 )
