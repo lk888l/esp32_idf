@@ -18,7 +18,6 @@
 #include <string_view>
 
 static const char * TAG         = "app_main";
-static const char * MOTOR_TAG   = "Motor_task";
 static const std::string HEXMOTOR    = "Motor_task";
 
 /**
@@ -178,12 +177,12 @@ extern "C" void app_main(void)
     cfg.count = 1;
     // 0号电机，默认MIT模式
     cfg.motors[0].mode = HexfellowMotorController::HEXFELLOW_MODE_KIND_MIT;
-    cfg.motors[0].torque_permille = 300;
+    cfg.motors[0].torque_permille = 500;
     cfg.motors[0].kp_kd_torque_permille = 770;
     HexfellowMotorController::mit_mapping_default(cfg.motors[0].mapping);
     // 电机1: 速度模式
     cfg.motors[1].mode = HexfellowMotorController::HEXFELLOW_MODE_KIND_VELOCITY;
-    cfg.motors[1].torque_permille = 300;   // 速度模式的最大扭矩限制
+    cfg.motors[1].torque_permille = 500;   // 速度模式的最大扭矩限制
     // Create an instance of the motor control task
     HexfellowMotorTask hexmotor_task(HEXMOTOR, 8192, 8, can_driver, cfg);
     // 设置运行目标
@@ -192,7 +191,7 @@ extern "C" void app_main(void)
     target.position = 0.0f;
     target.velocity = 1.0f;
     target.kp = 0.0f;
-    target.kd = 0.0f;
+    target.kd = 1.0f;
     target.torque = 0.0f;
     hexmotor_task.setMitTarget(0,target);
     // 设置电机1 速度目标（target_rev_s=5.0 rps, torque_permille=200）
@@ -222,7 +221,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(gpio_config(&io_conf));
     /*────────────  Init GPIO  end ────────────*/
 
-    float motor0_velocity = 0.5f;           // 当前目标速度 (Rev/s)
+    float motor0_velocity = 0.8f;           // 当前目标速度 (Rev/s)
     constexpr float kMaxVelocity = 3.0f;   // 最高速度 (Rev/s)
 
     while (true) {

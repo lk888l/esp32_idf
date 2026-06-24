@@ -181,44 +181,49 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
     }
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    /* 2) Validate factory UID. */
+    /* 2) Validate factory UID (0x1018:01). */
     uint32_t factory_uid = 0;
-    if (sdo.ul_u32(id, 0x1018, 1, &factory_uid) != 0) {return false;ESP_LOGI("morot_debug","0x1018, 1 sdo fail\n");}
-    if (factory_uid != FACTORY_UID) {return false;ESP_LOGI("morot_debug","0x1018, 1 sdo fail\n");}
+    if (sdo.ul_u32(id, 0x1018, 1, &factory_uid) != 0) return false;
+    if (factory_uid != FACTORY_UID) return false;
 
-    /* 3) Validate firmware version (must be within [min, max]). */
+    /* 3) Validate firmware version (0x1018:03, v8+). */
     uint32_t fw = 0;
     if (sdo.ul_u32(id, 0x1018, 3, &fw) != 0) return false;
-    if (fw < MIN_VERSION || fw > MAX_VERSION) {
-        return false;
-    }
+    if (fw < MIN_VERSION) return false;
     runtime_set_.motors[index].firmware_version = fw;
 
-    /* 4) Read serial number and peak torque (constants). */
+    /* 4) Read serial number (0x1018:04). */
     uint32_t serial = 0;
     if (sdo.ul_u32(id, 0x1018, 4, &serial) != 0) return false;
     runtime_set_.motors[index].serial_number = serial;
 
+    /* 5) Read peak torque (0x6076:00, REAL32, Nm). */
     float peak = 0.0f;
     if (sdo.ul_f32(id, 0x6076, 0, &peak) != 0) return false;
     runtime_set_.motors[index].peak_torque_mNm = peak;
 
-    /* 5) Reset CiA402 state machine and clear faults. */
+    /* 6) Short-circuit-brake on disable (0x2040:00). */
+    sdo.dl_u8(id, 0x2040, 0, 1);
+
+    /* 7) Max-torque limit (0x6072:00). */
+    sdo.dl_u16(id, 0x6072, 0, runtime_set_.motors[index].torque_permille);
+
+    /* 8) Disable consumer-heartbeat monitoring while we reconfigure (0x1016:01). */
+    sdo.dl_u32(id, 0x1016, 1, 0);
+
+    /* 9) CiA402 state machine reset (0x6040:00: 0 -> 0x80). */
     sdo.dl_u16(id, 0x6040, 0, 0x0000);
     vTaskDelay(pdMS_TO_TICKS(10));
     sdo.dl_u16(id, 0x6040, 0, 0x0080);
     vTaskDelay(pdMS_TO_TICKS(10));
-    sdo.dl_u16(id, 0x6040, 0, 0x0080);
-    vTaskDelay(pdMS_TO_TICKS(10));
 
-    /* 6) Disable consumer-heartbeat monitoring while we reconfigure. */
-    sdo.dl_u32(id, 0x1016, 1, 0);
-    /* 7) Short-circuit-brake on disable. */
-    sdo.dl_u8(id, 0x2040, 0, 1);
-    /* 8) Per-mode max-torque (6072h). */
-    sdo.dl_u16(id, 0x6072, 0, runtime_set_.motors[index].torque_permille);
+    /* 10) Mode of operation (0x6060:00: MIT=5, Profile Velocity=3). */
+    const int8_t mode_value = (runtime_set_.motors[index].mode == HEXFELLOW_MODE_KIND_MIT)
+                                ? MODE_MIT
+                                : MODE_PROFILE_VELOCITY;
+    sdo.dl_i8(id, 0x6060, 0, mode_value);
 
-    /* 9) MIT-specific: KP/KD output torque limit and target ranges. */
+    /* 11) MIT-specific: 0x2004 sub-index ranges and KP/KD limits. */
     if (runtime_set_.motors[index].mode == HEXFELLOW_MODE_KIND_MIT) {
         const auto& m = runtime_set_.motors[index].mapping;
         sdo.dl_u16(id, 0x2004, 0x0E, runtime_set_.motors[index].kp_kd_torque_permille);
@@ -234,7 +239,7 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
         sdo.dl_f32(id, 0x2004, 0x0D, m.torque_max);
 
         /* Pre-load 2004h-02/03 with a zero-target value so the first frame
-        * after enable doesn't cause an instantaneous torque spike. */
+         * after enable doesn't cause an instantaneous torque spike. */
         mit_target_t zero{};
         uint8_t bytes[8]{};
         hexfellow_mit_target_pack(&zero, &m, bytes);
@@ -251,27 +256,16 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
         sdo.dl_u8(id, 0x2004, 0x01, 1);
     }
 
-    /* 10) TPDO1/2 mapping. */
+    /* 12) Configure TPDO1 / TPDO2 mapping. */
     configureTpdo1(sdo, id);
     configureTpdo2(sdo, id);
 
-    /* 11) RPDO1: shared 0x190 + per-motor mapping (fixed 8-byte slot). */
+    /* 13) Configure RPDO1 mapping (shared COB-ID 0x190 + dynamic offset padding). */
     rpdoDisable(sdo, id);
     rpdoMapMotor(sdo, id, index, runtime_set_.count);
     rpdoEnable(sdo, id);
 
-    /* 12) Re-enable consumer-heartbeat monitoring of the master. */
-    const uint32_t hb = (static_cast<uint32_t>(MASTER_NODE_ID) << 16) |
-                        MOTOR_HB_TIMEOUT_MS;
-    sdo.dl_u32(id, 0x1016, 1, hb);
-
-    /* 13) Mode of operation (MIT=5, Profile Velocity=3). */
-    const int8_t mode_value = (runtime_set_.motors[index].mode == HEXFELLOW_MODE_KIND_MIT)
-                                ? MODE_MIT
-                                : MODE_PROFILE_VELOCITY;
-    sdo.dl_i8(id, 0x6060, 0, mode_value);
-
-    /* 14) CiA402 state-machine ramp: 6 -> 7 -> 0xF (operation enabled). */
+    /* 14) CiA402 state-machine ramp: Shutdown(6) -> SwitchOn(7) -> Enable(0xF). */
     sdo.dl_u16(id, 0x6040, 0, 0x0006);
     vTaskDelay(pdMS_TO_TICKS(10));
     sdo.dl_u16(id, 0x6040, 0, 0x0007);
@@ -283,6 +277,10 @@ bool HexfellowMotorController::initOneMotor(co_master_sdo& sdo, Esp32CanFdDriver
     if (!sendNmt(driver, NMT_OPERATIONAL, id)) {
         return false;
     }
+
+    /* 16) Enable consumer-heartbeat monitoring (timeout 250ms). */
+    const uint32_t hb = (static_cast<uint32_t>(MASTER_NODE_ID) << 16) | 250;
+    sdo.dl_u32(id, 0x1016, 1, hb);
 
     return true;
 }
