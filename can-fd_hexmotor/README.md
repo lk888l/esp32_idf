@@ -2,7 +2,7 @@
 
 基于 **ESP32-C5** + **ESP-IDF 5.5** 的多电机 CANopen-over-CAN-FD 实时控制系统。通过一对多 RPDO 广播架构，以 **1ms 控制周期**同时驱动最多 **8 台 Hexfellow 无刷直流电机**。
 
-如果你只想简单使用（无需 PDO 广播架构），可以参考 [SDO 简易驱动演示](#sdo-简易驱动演示-motor_sdo_control_task) — 一个独立的 FreeRTOS 任务，仅通过 CANopen SDO expedited download 即可配置并驱动一台电机，需要注意：在一个单片机中请选择一个任务运行，PDO（Motor_Control_Task类）或SDO（独立任务函数Motor_Control_Task），切忌不要同时运行两演示任务，否则会导致冲突。
+如果你只想简单使用（无需 PDO 广播架构），可以参考 [SDO 简易驱动演示](#sdo-简易驱动演示-motor_sdo_control_task) —— 一个独立的 FreeRTOS 任务，仅通过 CANopen SDO expedited download 即可配置并驱动电机，需要注意：在一个单片机中请选择一个任务运行，PDO（Motor_Control_Task类）或SDO（独立任务函数Motor_Control_Task），切忌不要同时运行两演示任务，否则会导致冲突。
 
 !!! warning "仅供演示"
     本工程**仅用于学习与台架验证**，非生产级软件；无完善错误恢复与安全联锁。用于任何可能造成伤害或损失的场景前，请自行审计并编写适合产品的驱动。

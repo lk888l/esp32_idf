@@ -28,12 +28,11 @@ public:
 
     /* Vendor / firmware checks (1018h identity object). */
     constexpr static uint32_t FACTORY_UID = 0x4859444Cu;  /* factory UID reported by hexfellow firmware */
-    constexpr static uint8_t MIN_VERSION = 8u;           /* minimum required firmware version */
-    constexpr static uint8_t MAX_VERSION = 9u;           /* maximum required firmware version */
+    constexpr static uint8_t MIN_VERSION = 8u;           /* minimum required firmware version (v8+) */
 
     /* Heartbeat parameters. */
     constexpr static uint8_t MASTER_HB_PERIOD_MS  =  50u;
-    constexpr static uint16_t MOTOR_HB_TIMEOUT_MS  =  500u;
+    constexpr static uint16_t MOTOR_HB_TIMEOUT_MS  =  250u;
 
     /* CiA301 default COB-IDs */
     constexpr static uint16_t COB_NMT = 0x000u;
