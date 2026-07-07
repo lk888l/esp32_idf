@@ -4,7 +4,7 @@
 #include <array>
 #include <cstdio>
 
-namespace esp_template {
+namespace ium {
 
 std::atomic<LogLevel> Logger::s_global_level_{LogLevel::INFO};
 ConsoleLogSink Logger::s_default_sink_;
@@ -124,4 +124,4 @@ int Logger::vprintfHook(const char* fmt, va_list args)
     return len;
 }
 
-} // namespace esp_template
+} // namespace ium

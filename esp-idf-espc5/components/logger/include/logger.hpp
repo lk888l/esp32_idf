@@ -8,16 +8,16 @@
 #define LOGGER_HAS_STD_FORMAT 0
 #endif
 
-#include <atomic>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
 
-namespace esp_template {
+namespace ium {
 
 enum class LogLevel : uint8_t {
     NONE = 0,
@@ -165,7 +165,6 @@ void Logger::verbose(std::string_view fmt, Args&&... args)
     logFormatted(LogLevel::VERBOSE, fmt, std::forward<Args>(args)...);
 }
 
-} // namespace esp_template
+} // namespace ium
 
-namespace ium = esp_template;
-namespace espidf_template = esp_template;
+namespace espidf_template = ium;

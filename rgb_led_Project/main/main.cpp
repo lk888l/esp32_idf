@@ -1,77 +1,174 @@
-// main.cpp — W2812B rainbow gradient demo
+#include "app_manager.hpp"
+#include "app_module.hpp"
+#include "app_task.hpp"
+#include "esp_rmt_ws2812b_strip.hpp"
+#include "logger.hpp"
+#include "ws2812b_strip.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string_view>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_log.h"
 
-// BSP layer
-#include "uart_dma_driver.hpp"
-#include "rmt_led_strip_driver.hpp"
+namespace {
 
-// Business layer
-#include "ws2812b.hpp"
+constexpr int kLedGpio = 27;
+constexpr std::size_t kLedCount = 16;
+constexpr uint8_t kBrightness = 64;
+constexpr uint8_t kHueStep = 2;
+constexpr uint32_t kFrameDelayMs = 30;
+constexpr uint32_t kTaskStackSize = 4096;
+constexpr UBaseType_t kTaskPriority = tskIDLE_PRIORITY + 1;
 
-// Project
-#include "logger.hpp"
+hardware::Rgb wheel(uint8_t position)
+{
+    if (position < 85) {
+        return {
+            static_cast<uint8_t>(255 - position * 3),
+            static_cast<uint8_t>(position * 3),
+            0,
+        };
+    }
 
-// cpp standard library
-#include <memory>
+    if (position < 170) {
+        position = static_cast<uint8_t>(position - 85);
+        return {
+            0,
+            static_cast<uint8_t>(255 - position * 3),
+            static_cast<uint8_t>(position * 3),
+        };
+    }
 
-static const char* TAG = "app_main";
+    position = static_cast<uint8_t>(position - 170);
+    return {
+        static_cast<uint8_t>(position * 3),
+        0,
+        static_cast<uint8_t>(255 - position * 3),
+    };
+}
 
-/// ──────────── LED strip configuration ────────────
-static constexpr int      LED_GPIO       = GPIO_NUM_27;   ///< W2812B data pin
-static constexpr size_t   LED_COUNT      = 16;           ///< Number of LEDs
-static constexpr uint8_t  BRIGHTNESS     = 64;           ///< Global brightness (0-255)
-static constexpr uint8_t  RAINBOW_SPEED  = 2;            ///< Hue advance per frame
+class RainbowTask final : public AppTask {
+public:
+    explicit RainbowTask(hardware::IWs2812bStrip& strip)
+        : AppTask("ws2812b_rainbow", kTaskStackSize, kTaskPriority)
+        , strip_(strip)
+    {
+    }
+
+private:
+    void main() override
+    {
+        uint8_t hue = 0;
+
+        while (!shouldExit()) {
+            for (std::size_t i = 0; i < strip_.size(); ++i) {
+                const uint8_t pixel_hue = static_cast<uint8_t>(
+                    hue + (i * 256U / strip_.size()));
+                strip_.setPixel(i, wheel(pixel_hue));
+            }
+
+            strip_.show();
+            hue = static_cast<uint8_t>(hue + kHueStep);
+            vTaskDelay(pdMS_TO_TICKS(kFrameDelayMs));
+        }
+
+        strip_.clear();
+        strip_.show();
+    }
+
+    hardware::IWs2812bStrip& strip_;
+};
+
+class RainbowModule final : public AppModule {
+public:
+    RainbowModule()
+        : strip_({
+            .data_pin = kLedGpio,
+            .led_count = kLedCount,
+            .brightness = kBrightness,
+        })
+        , task_(strip_)
+    {
+    }
+
+    bool initialize() override
+    {
+        if (initialized_) {
+            return true;
+        }
+
+        if (!strip_.initialize()) {
+            log_.error("failed to initialize WS2812B strip");
+            return false;
+        }
+
+        strip_.clear();
+        strip_.show();
+
+        if (!task_.start()) {
+            strip_.deinitialize();
+            log_.error("failed to start WS2812B rainbow task");
+            return false;
+        }
+
+        initialized_ = true;
+        log_.info("rainbow demo started on GPIO {}, LEDs={}", kLedGpio, kLedCount);
+        return true;
+    }
+
+    bool deinitialize() override
+    {
+        if (!initialized_) {
+            return true;
+        }
+
+        const bool stopped = task_.stop();
+        strip_.clear();
+        strip_.show();
+        strip_.deinitialize();
+
+        initialized_ = !stopped;
+        return stopped;
+    }
+
+    bool is_initialized() const override { return initialized_; }
+    std::string_view name() const override { return "ws2812b_rainbow_demo"; }
+
+private:
+    hardware::EspRmtWs2812bStrip strip_;
+    RainbowTask task_;
+    esp_template::Logger log_{"ws2812b_demo"};
+    bool initialized_ = false;
+};
+
+} // namespace
 
 extern "C" void app_main(void)
 {
-    // ── 1. UART DMA (logging) ───────────────────────────────────
-    Esp32UartDmaDriver::Config uart_cfg = {};
-    uart_cfg.uart_num = UART_NUM_0;
-    uart_cfg.tx_pin   = GPIO_NUM_11;
-    uart_cfg.rx_pin   = GPIO_NUM_12;
-    uart_cfg.baudrate = 115200;
-    Esp32UartDmaDriver uart_drv(uart_cfg);
+    esp_template::Logger log("main");
+    auto& manager = app::AppManager::get_instance();
 
-    if (uart_drv.init() && uart_drv.start()) {
-        espidf_template::Logger::setUart(&uart_drv);
-        esp_log_set_vprintf(&espidf_template::Logger::vprintfHook);
+    if (!manager.register_module(std::make_unique<RainbowModule>())) {
+        log.error("failed to register WS2812B demo module");
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
     }
 
-    espidf_template::Logger logger(TAG);
-    logger.info("W2812B rainbow demo starting...");
-
-    // ── 2. LED strip — BSP driver ───────────────────────────────
-    Esp32RmtLedStripDriver::Config led_cfg = {};
-    led_cfg.gpio_num = LED_GPIO;
-    led_cfg.max_leds = LED_COUNT;
-    auto driver = std::make_shared<Esp32RmtLedStripDriver>(led_cfg);
-
-    if (!driver->init()) {
-        logger.error("RMT LED driver init failed");
-        return;
-    }
-    if (!driver->start()) {
-        logger.error("RMT LED driver start failed");
-        return;
+    if (!manager.initialize_all()) {
+        log.error("failed to initialize application modules");
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
     }
 
-    // ── 3. LED strip — business controller ──────────────────────
-    Ws2812bStrip strip(driver, LED_COUNT);
-    strip.setBrightness(BRIGHTNESS);
-    strip.clear();
-    strip.show();
+    log.info("RGB LED application started");
 
-    logger.info("LED strip ready — {} pixels on GPIO {}", LED_COUNT, LED_GPIO);
-
-    // ── 4. Rainbow loop ─────────────────────────────────────────
-    uint8_t hue = 0;
     while (true) {
-        strip.fillRainbow(hue, 255 / LED_COUNT);  // spread full hue range across strip
-        strip.show();
-
-        hue += RAINBOW_SPEED;
-        vTaskDelay(pdMS_TO_TICKS(30));            // ~33 fps
+        manager.process_all();
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

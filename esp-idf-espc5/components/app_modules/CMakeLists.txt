@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "src/gyro_reader_module.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        app
+        bsp
+        hardware
+        logger
+        vqf
+        freertos
+)

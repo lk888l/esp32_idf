@@ -1,10 +1,10 @@
 idf_component_register(
     SRCS
-        "src/esp_rmt_ws2812b_strip.cpp"
+        "src/bsp_i2c.cpp"
+        "src/esp_i2c_bus.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
+        esp_driver_i2c
         esp_driver_gpio
-        esp_driver_rmt
-        freertos
 )

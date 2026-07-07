@@ -6,8 +6,12 @@ cmake_minimum_required(VERSION 3.16)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(EXTRA_COMPONENT_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/components/third_party/vqf"
+)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(rgb_led_project
+project(esp_idf_espc5_icm42688
         VERSION 1.0.0
         LANGUAGES C CXX
     )
