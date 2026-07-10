@@ -1,0 +1,80 @@
+menu "Camera Web Server"
+
+config CAMERA_WEB_WIFI_SSID
+    string "Wi-Fi SSID"
+    default "YOUR_WIFI_SSID"
+    help
+        Wi-Fi network name used by the camera web server.
+
+config CAMERA_WEB_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default "YOUR_WIFI_PASSWORD"
+    help
+        Wi-Fi password used by the camera web server.
+
+config CAMERA_WEB_WIFI_MAXIMUM_RETRY
+    int "Wi-Fi maximum retry count"
+    default 8
+    range 1 30
+
+config CAMERA_WEB_WIFI_CONNECT_TIMEOUT_MS
+    int "Wi-Fi connect timeout in milliseconds"
+    default 20000
+    range 1000 120000
+
+choice CAMERA_WEB_FRAMESIZE
+    prompt "Camera frame size"
+    default CAMERA_WEB_FRAMESIZE_QSXGA
+
+config CAMERA_WEB_FRAMESIZE_QVGA
+    bool "QVGA 320x240"
+
+config CAMERA_WEB_FRAMESIZE_VGA
+    bool "VGA 640x480"
+
+config CAMERA_WEB_FRAMESIZE_SVGA
+    bool "SVGA 800x600"
+
+config CAMERA_WEB_FRAMESIZE_XGA
+    bool "XGA 1024x768"
+
+config CAMERA_WEB_FRAMESIZE_SXGA
+    bool "SXGA 1280x1024"
+
+config CAMERA_WEB_FRAMESIZE_UXGA
+    bool "UXGA 1600x1200"
+
+config CAMERA_WEB_FRAMESIZE_QXGA
+    bool "QXGA 2048x1536"
+
+config CAMERA_WEB_FRAMESIZE_QSXGA
+    bool "QSXGA 2560x1920 (OV5640 max)"
+
+endchoice
+
+config CAMERA_WEB_JPEG_QUALITY
+    int "JPEG quality"
+    default 10
+    range 4 63
+    help
+        Smaller values produce higher quality and larger frames.
+
+config CAMERA_WEB_FB_COUNT
+    int "Camera framebuffer count"
+    default 2
+    range 1 3
+
+config CAMERA_WEB_VFLIP
+    bool "Vertical flip"
+    default n
+
+config CAMERA_WEB_HMIRROR
+    bool "Horizontal mirror"
+    default n
+
+config CAMERA_WEB_HTTPD_STACK_SIZE
+    int "HTTP server task stack size"
+    default 8192
+    range 4096 32768
+
+endmenu

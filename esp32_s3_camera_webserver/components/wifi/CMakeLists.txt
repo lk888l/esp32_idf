@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "src/wifi_station_module.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        app
+        esp_event
+        esp_netif
+        esp_wifi
+        logger
+        nvs_flash
+)

@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "src/camera_web_server_module.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        app
+        camera
+        esp_http_server
+        esp_timer
+        logger
+)

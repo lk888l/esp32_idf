@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "src/esp_camera_device.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp
+        esp32-camera
+        logger
+)

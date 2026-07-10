@@ -1,0 +1,9 @@
+idf_component_register(
+    SRCS
+        "src/gpio_button_service.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        driver
+        freertos
+)
