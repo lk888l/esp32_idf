@@ -1,0 +1,15 @@
+idf_component_register(
+    SRCS
+        "main.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        app
+        bsp
+        display
+        esp_rom
+        esp_system
+        esp_timer
+        freertos
+        logger
+)

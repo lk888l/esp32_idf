@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "src/oled_display.cpp"
+        "src/oled_canvas.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp
+        u8g2
+)
