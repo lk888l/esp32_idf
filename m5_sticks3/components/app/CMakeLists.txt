@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "src/app_manager.cpp"
+        "src/app_task.cpp"
+        "src/button_event_bus.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        freertos
+        log
+)

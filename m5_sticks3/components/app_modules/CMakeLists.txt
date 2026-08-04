@@ -1,0 +1,19 @@
+idf_component_register(
+    SRCS
+        "src/board_module.cpp"
+        "src/button_module.cpp"
+        "src/motion_module.cpp"
+        "src/ui_module.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        app
+        bsp
+        model
+        bmi270
+        esp_lvgl_port
+        lvgl
+        vqf
+        esp_timer
+        heap
+)
