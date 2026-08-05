@@ -1,11 +1,11 @@
 idf_component_register(
     SRCS
-        "main.cpp"
+        "src/gpio_blink_module.cpp"
     INCLUDE_DIRS
-        "."
+        "include"
     REQUIRES
         app
-        app_modules
+        driver
         freertos
         log
 )

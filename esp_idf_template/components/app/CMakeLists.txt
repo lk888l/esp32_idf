@@ -1,9 +1,10 @@
 idf_component_register(
-    SRCS 
-        "src/app_task.cpp"
+    SRCS
         "src/app_manager.cpp"
-    INCLUDE_DIRS 
+        "src/app_task.cpp"
+    INCLUDE_DIRS
         "include"
     REQUIRES
         freertos
+        log
 )

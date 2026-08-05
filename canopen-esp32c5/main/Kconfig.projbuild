@@ -1,0 +1,59 @@
+menu "CANopen ESP32-C5"
+
+config CANOPEN_NODE_ID
+    int "CANopen node ID"
+    range 1 127
+    default 33
+
+config CANOPEN_HEARTBEAT_PERIOD_MS
+    int "Default producer heartbeat period (ms)"
+    range 1 65535
+    default 100
+
+config CANOPEN_TWAI_TX_GPIO
+    int "TWAI-FD TX GPIO"
+    range 0 30
+    default 4
+
+config CANOPEN_TWAI_RX_GPIO
+    int "TWAI-FD RX GPIO"
+    range 0 30
+    default 5
+
+config CANOPEN_TWAI_TX_QUEUE_DEPTH
+    int "TWAI driver TX queue depth"
+    range 4 64
+    default 16
+
+config CANOPEN_TWAI_RX_QUEUE_DEPTH
+    int "Application RX queue depth"
+    range 8 128
+    default 32
+
+config CANOPEN_TASK_STACK_SIZE
+    int "CANopen service task stack size"
+    range 4096 16384
+    default 6144
+
+config CANOPEN_TASK_PRIORITY
+    int "CANopen service task priority"
+    range 2 20
+    default 12
+
+config CANOPEN_VENDOR_ID
+    hex "Identity vendor ID (0x1018:01)"
+    default 0x00000000
+
+config CANOPEN_PRODUCT_CODE
+    hex "Identity product code (0x1018:02)"
+    default 0xC5000001
+
+config CANOPEN_REVISION_NUMBER
+    hex "Identity revision number (0x1018:03)"
+    default 0x00010000
+
+config CANOPEN_SERIAL_NUMBER
+    hex "Identity serial number (0x1018:04)"
+    default 0x00000001
+
+endmenu

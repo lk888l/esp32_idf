@@ -2,111 +2,93 @@
 
 namespace app {
 
-AppManager& AppManager::get_instance()
+RegistrationResult AppManager::register_module(std::unique_ptr<AppModule> module)
 {
-    static AppManager instance;
-    return instance;
-}
-
-bool AppManager::register_module(std::unique_ptr<AppModule> module)
-{
-    if (!module || started_) {
-        return false;
+    if (state_ != State::configuring) {
+        return {RegistrationStatus::invalid_state, module ? module->name() : std::string_view{}};
+    }
+    if (!module) {
+        return {RegistrationStatus::null_module, {}};
+    }
+    if (module_count_ >= modules_.size()) {
+        return {RegistrationStatus::registry_full, module->name()};
     }
 
-    modules_.push_back(std::move(module));
-    return true;
-}
-
-bool AppManager::initialize_all()
-{
-    if (started_) {
-        return true;
+    const std::string_view name = module->name();
+    for (size_t index = 0; index < module_count_; ++index) {
+        if (modules_[index] && modules_[index]->name() == name) {
+            return {RegistrationStatus::duplicate_name, name};
+        }
     }
 
-    std::size_t initialized_count = 0;
-    for (auto& module : modules_) {
-        if (!module || !module->initialize()) {
-            while (initialized_count > 0) {
-                --initialized_count;
-                auto& initialized_module = modules_[initialized_count];
-                if (initialized_module && initialized_module->is_initialized()) {
-                    initialized_module->deinitialize();
+    modules_[module_count_++] = std::move(module);
+    return {RegistrationStatus::ok, name};
+}
+
+LifecycleResult AppManager::initialize_all()
+{
+    if (state_ == State::running) {
+        return {LifecycleStatus::ok, {}};
+    }
+    if (state_ != State::configuring) {
+        return {LifecycleStatus::invalid_state, {}};
+    }
+
+    size_t initialized = 0;
+    for (; initialized < module_count_; ++initialized) {
+        auto& module = modules_[initialized];
+        if (!module->initialize()) {
+            const std::string_view failed_name = module->name();
+            if (module->state() == AppModuleState::cleanup_failed) {
+                state_ = State::faulted;
+                return {LifecycleStatus::rollback_failed, failed_name};
+            }
+
+            while (initialized > 0) {
+                auto& rollback_module = modules_[--initialized];
+                if (!rollback_module->deinitialize()) {
+                    state_ = State::faulted;
+                    return {LifecycleStatus::rollback_failed, rollback_module->name()};
                 }
             }
-            return false;
+            return {LifecycleStatus::module_failed, failed_name};
         }
-
-        ++initialized_count;
     }
 
-    started_ = true;
-    return true;
+    state_ = State::running;
+    return {LifecycleStatus::ok, {}};
 }
 
-bool AppManager::deinitialize_all()
+LifecycleResult AppManager::deinitialize_all()
 {
-    bool ok = true;
+    if (state_ == State::configuring) {
+        return {LifecycleStatus::ok, {}};
+    }
 
-    for (auto it = modules_.rbegin(); it != modules_.rend(); ++it) {
-        if (!*it) {
-            ok = false;
-            continue;
-        }
-
-        if ((*it)->is_initialized() && !(*it)->deinitialize()) {
-            ok = false;
+    for (size_t remaining = module_count_; remaining > 0; --remaining) {
+        auto& module = modules_[remaining - 1];
+        if (module->state() != AppModuleState::stopped && !module->deinitialize()) {
+            state_ = State::faulted;
+            return {LifecycleStatus::module_failed, module->name()};
         }
     }
 
-    if (ok) {
-        started_ = false;
-    }
-
-    return ok;
+    state_ = State::configuring;
+    return {LifecycleStatus::ok, {}};
 }
 
 void AppManager::process_all()
 {
-    for (auto& module : modules_) {
+    if (state_ != State::running) {
+        return;
+    }
+
+    for (size_t index = 0; index < module_count_; ++index) {
+        auto& module = modules_[index];
         if (module && module->is_initialized()) {
             module->process();
         }
     }
-}
-
-std::size_t AppManager::get_module_count() const
-{
-    return modules_.size();
-}
-
-AppModule* AppManager::get_module(std::size_t index)
-{
-    if (index >= modules_.size()) {
-        return nullptr;
-    }
-
-    return modules_[index].get();
-}
-
-const AppModule* AppManager::get_module(std::size_t index) const
-{
-    if (index >= modules_.size()) {
-        return nullptr;
-    }
-
-    return modules_[index].get();
-}
-
-bool AppManager::all_initialized() const
-{
-    for (const auto& module : modules_) {
-        if (!module || !module->is_initialized()) {
-            return false;
-        }
-    }
-
-    return true;
 }
 
 } // namespace app
