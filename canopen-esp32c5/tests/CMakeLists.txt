@@ -18,3 +18,15 @@ target_include_directories(canopen_core_tests PRIVATE
 )
 add_test(NAME canopen_core COMMAND canopen_core_tests)
 
+add_executable(wireless_protocol_tests
+    test_wireless_protocol.cpp
+    ../components/wireless_protocol/src/protocol.cpp
+)
+target_compile_features(wireless_protocol_tests PRIVATE cxx_std_20)
+target_compile_options(wireless_protocol_tests PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(wireless_protocol_tests PRIVATE
+    ../components/can_transport/include
+    ../components/wireless_protocol/include
+)
+add_test(NAME wireless_protocol COMMAND wireless_protocol_tests)
+

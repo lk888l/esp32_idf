@@ -30,6 +30,16 @@ config CANOPEN_TWAI_RX_QUEUE_DEPTH
     range 8 128
     default 32
 
+config CANOPEN_GATEWAY_INGRESS_QUEUE_DEPTH
+    int "Wireless-to-CAN ingress queue depth"
+    range 8 128
+    default 32
+
+config CANOPEN_GATEWAY_MONITOR_QUEUE_DEPTH
+    int "CAN-to-wireless monitor queue depth"
+    range 16 128
+    default 64
+
 config CANOPEN_TASK_STACK_SIZE
     int "CANopen service task stack size"
     range 4096 16384
@@ -55,5 +65,97 @@ config CANOPEN_REVISION_NUMBER
 config CANOPEN_SERIAL_NUMBER
     hex "Identity serial number (0x1018:04)"
     default 0x00000001
+
+endmenu
+
+menu "Wireless CAN-FD gateway"
+
+config WIRELESS_GATEWAY_ENABLED
+    bool "Enable BLE and Wi-Fi CAN-FD gateway"
+    depends on BT_ENABLED && BT_NIMBLE_ENABLED
+    default n
+    help
+        Fail-closed by default. Enable only after supplying all three secrets
+        below from a protected sdkconfig overlay or CI secret store.
+
+config WIRELESS_AP_PASSWORD
+    string "SoftAP WPA2/WPA3 password"
+    depends on WIRELESS_GATEWAY_ENABLED
+    default ""
+    help
+        Must contain 8 to 63 characters. It is never logged or returned over
+        any wireless interface.
+
+config WIRELESS_BLE_PASSKEY
+    int "BLE Secure Connections passkey"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 0 999999
+    default 0
+    help
+        Set a six-digit value from 100000 to 999999. The client enters it
+        during MITM-protected pairing.
+
+config WIRELESS_TCP_CONTROL_KEY_HEX
+    string "TCP HMAC-SHA256 control key (64 hex digits)"
+    depends on WIRELESS_GATEWAY_ENABLED
+    default ""
+    help
+        A non-zero 32-byte key used by the TCP challenge-response handshake.
+        Inject it through a protected build configuration; it is never logged
+        or returned over the air.
+
+config WIRELESS_AP_CHANNEL
+    int "SoftAP channel"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 1 13
+    default 6
+
+config WIRELESS_AP_MAX_CLIENTS
+    int "Maximum SoftAP clients"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 1 8
+    default 4
+
+config WIRELESS_TCP_PORT
+    int "CAN-FD tunnel TCP port"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 1024 65535
+    default 3333
+
+config WIRELESS_DISCOVERY_PORT
+    int "UDP discovery port"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 1024 65535
+    default 3334
+
+config WIRELESS_TCP_MAX_CLIENTS
+    int "Maximum authenticated TCP clients"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 1 4
+    default 2
+
+config WIRELESS_TCP_TASK_STACK_SIZE
+    int "TCP server task stack size"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 4096 12288
+    default 6144
+
+config WIRELESS_TCP_TASK_PRIORITY
+    int "TCP server task priority"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 2 15
+    default 8
+
+config WIRELESS_SERVICE_TASK_STACK_SIZE
+    int "Wireless router task stack size"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 4096 12288
+    default 6144
+
+config WIRELESS_SERVICE_TASK_PRIORITY
+    int "Wireless router task priority"
+    depends on WIRELESS_GATEWAY_ENABLED
+    range 2 15
+    default 9
 
 endmenu

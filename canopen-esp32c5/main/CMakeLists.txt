@@ -1,2 +1,5 @@
-idf_component_register(SRCS "main.cpp" INCLUDE_DIRS "." REQUIRES app canopen_esp32)
-
+idf_component_register(
+    SRCS "main.cpp"
+    INCLUDE_DIRS "."
+    REQUIRES app canopen_esp32 wireless_esp32
+)

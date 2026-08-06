@@ -11,9 +11,9 @@ constexpr char kTag[] = "canopen";
 CanopenModule::CanopenModule(ModuleConfig config)
     : parameter_storage_(config.profile.node_id)
     , config_(prepare_config(config, parameter_storage_))
-    , transport_(config_.twai)
-    , profile_(config_.profile, transport_)
-    , task_(transport_, profile_, config_.task_stack_size, config_.task_priority)
+    , gateway_(config_.twai, config_.gateway)
+    , profile_(config_.profile, gateway_)
+    , task_(gateway_, profile_, config_.task_stack_size, config_.task_priority)
 {
 }
 
@@ -36,7 +36,7 @@ bool CanopenModule::initialize()
         ESP_LOGE(kTag, "persistent parameter storage is unavailable");
         return false;
     }
-    if (!transport_.initialize()) {
+    if (!gateway_.initialize()) {
         ESP_LOGE(kTag, "transport initialization failed");
         return false;
     }
@@ -45,16 +45,16 @@ bool CanopenModule::initialize()
         ESP_LOGE(kTag,
                  "object dictionary initialization failed: 0x%08lx",
                  static_cast<unsigned long>(profile_result));
-        (void)transport_.stop();
+        (void)gateway_.stop();
         return false;
     }
-    if (!transport_.start()) {
-        (void)transport_.stop();
+    if (!gateway_.start()) {
+        (void)gateway_.stop();
         return false;
     }
     const uint64_t now_us = esp_timer_get_time();
     if (!profile_.start(now_us) || !task_.start()) {
-        (void)transport_.stop();
+        (void)gateway_.stop();
         return false;
     }
     initialized_ = true;
@@ -76,7 +76,7 @@ bool CanopenModule::deinitialize()
         return true;
     }
     const bool task_stopped = task_.stop(pdMS_TO_TICKS(2000));
-    const bool transport_stopped = transport_.stop();
+    const bool transport_stopped = gateway_.stop();
     initialized_ = !(task_stopped && transport_stopped);
     return !initialized_;
 }
@@ -91,9 +91,10 @@ void CanopenModule::process()
         return;
     }
     last_report_ms_ = now_ms;
-    const TwaiStatistics stats = transport_.statistics();
+    const TwaiStatistics stats = gateway_.twai_statistics();
+    const GatewayStatistics gateway_stats = gateway_.gateway_statistics();
     ESP_LOGI(kTag,
-             "state=0x%02X hb=%lu rx=%lu drop=%lu tx=%lu fail=%lu err=%lu recover=%lu",
+             "state=0x%02X hb=%lu rx=%lu drop=%lu tx=%lu fail=%lu err=%lu recover=%lu wireless-in=%lu/%lu wireless-out=%lu/%lu",
              static_cast<unsigned>(profile_.node().state()),
              static_cast<unsigned long>(profile_.node().heartbeat_count()),
              static_cast<unsigned long>(stats.rx_frames),
@@ -101,22 +102,35 @@ void CanopenModule::process()
              static_cast<unsigned long>(stats.tx_frames),
              static_cast<unsigned long>(stats.tx_failed),
              static_cast<unsigned long>(stats.bus_errors),
-             static_cast<unsigned long>(stats.recoveries));
+             static_cast<unsigned long>(stats.recoveries),
+             static_cast<unsigned long>(gateway_stats.ingress_frames),
+             static_cast<unsigned long>(gateway_stats.ingress_dropped),
+             static_cast<unsigned long>(gateway_stats.forwarded_frames),
+             static_cast<unsigned long>(gateway_stats.monitor_dropped));
 }
 
 void CanopenModule::ServiceTask::run()
 {
     while (!stop_requested()) {
         can::Frame frame{};
-        if (transport_.receive(frame, 1)) {
+        if (gateway_.receive_from_bus(frame, 1)) {
             do {
+                gateway_.observe(frame,
+                                 GatewayOrigin::physical_bus,
+                                 static_cast<uint64_t>(esp_timer_get_time()));
                 (void)profile_.handle(frame, esp_timer_get_time());
-            } while (transport_.receive(frame, 0));
+            } while (gateway_.receive_from_bus(frame, 0));
         }
-        transport_.maintenance();
+        while (gateway_.receive_injected(frame, 0)) {
+            (void)gateway_.send_to_bus(frame, 0);
+            gateway_.observe(frame,
+                             GatewayOrigin::wireless_client,
+                             static_cast<uint64_t>(esp_timer_get_time()));
+            (void)profile_.handle(frame, esp_timer_get_time());
+        }
+        gateway_.maintenance();
         profile_.process(esp_timer_get_time());
     }
 }
 
 } // namespace canopen_esp32
-

@@ -22,6 +22,12 @@ canopen::StandardProfile      EspTwaiTransport
 
 依赖方向始终向下：`canopen` 只能依赖 `can_transport`，不能包含 ESP-IDF 或 FreeRTOS 头文件。平台适配层依赖协议核心和 ESP-IDF。产品层只负责组装配置和模块。
 
+The diagram above shows the original CANopen core. In the integrated product,
+`EspCanGateway` now sits between `StandardProfile` and `EspTwaiTransport`.
+`WirelessModule` uses the gateway's bounded ingress and monitor queues; it
+never calls the CANopen object dictionary directly. The complete data-plane
+diagram is maintained in `docs/wireless-gateway.md`.
+
 ## Components
 
 ### `can_transport`
@@ -52,6 +58,28 @@ canopen::StandardProfile      EspTwaiTransport
 - Bus-off callback 只置位，实际 `twai_node_recover()` 在任务上下文执行。
 - FD payload 自动向合法 DLC 长度 `8/12/16/20/24/32/48/64` 补零，但协议帧的逻辑长度仍由映射决定。
 
+### `EspCanGateway`
+
+The gateway implements `can::ITransport` for local CANopen TX, owns a bounded
+wireless ingress queue, and owns a bounded monitor queue. Monitor entries carry
+the complete frame, origin, and device timestamp. The CANopen service task is
+the only consumer of physical RX and wireless ingress, preserving protocol
+state ownership.
+
+### `wireless_protocol`
+
+This platform-independent component defines HX v1 packet encoding, CRC32,
+stream resynchronization, and CAN/CAN-FD metadata. It is included in host tests
+and has no ESP-IDF or FreeRTOS dependency.
+
+### `wireless_esp32`
+
+This component owns SoftAP/APSTA lifecycle, station credential NVS, secure
+NimBLE GATT, UDP discovery, mutually authenticated TCP, bounded client TX
+rings, and wireless routing. Secrets are injected by product composition and
+are never exposed through a getter intended for protocol clients.
+
+
 ### `app`
 
 `app::Manager` 是固定 8 槽模块注册表。初始化按注册顺序执行；任一模块失败时按相反顺序回滚。正常释放同样逆序进行。模块对象只在启动装配阶段由 `unique_ptr` 分配，实时路径不分配。
@@ -65,6 +93,14 @@ Node-ID 保存是极低频维护操作：NVS commit 在协议任务中同步完�
 这条所有权规则必须保持：业务任务不能直接写 OD backing storage。业务集成应使用消息队列、双缓冲快照，或者在协议任务内执行的 read/write hook。对于多字节且可能被异步业务更新的对象，必须提供一致性快照，不能依赖 ESP32 对 64-bit 值的非原子访问。
 
 ## Bit timing
+Wireless callbacks and socket code do not call `StandardProfile::handle()`.
+They submit complete packets to `WirelessModule`; that task validates them and
+submits CAN frames to `EspCanGateway`. Conversely, the wireless task is the
+only consumer of the gateway monitor queue and fans frames out to BLE/TCP.
+This keeps BLE host, lwIP, TWAI callbacks, and CANopen state in separate
+ownership domains connected only by bounded queues and atomics.
+
+
 
 ESP32-C5 TWAI 默认控制器时钟为 80 MHz。工程使用 advanced timing 覆盖自动求解结果：
 
