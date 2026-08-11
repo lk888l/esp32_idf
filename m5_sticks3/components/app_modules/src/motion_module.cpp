@@ -1,6 +1,7 @@
 #include "app_modules.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <memory>
 #include <string_view>
@@ -11,6 +12,7 @@
 #include "bsp_board.hpp"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "motion_runtime.hpp"
 #include "motion_state.hpp"
 #include "vqf.hpp"
 
@@ -26,6 +28,9 @@ constexpr float kSampleTimeSeconds = 0.010f;
 constexpr float kDegreesToRadians = 0.017453292519943295f;
 constexpr float kRadiansToDegrees = 57.29577951308232f;
 constexpr float kGravity = 9.80665f;
+
+std::atomic<bool> motion_requested{false};
+std::atomic<MotionRuntimeState> runtime_state{MotionRuntimeState::stopped};
 
 void quaternion_to_euler(const float quaternion[4], float& roll, float& pitch, float& yaw)
 {
@@ -140,8 +145,60 @@ class MotionModule final : public AppModule {
 public:
     std::string_view name() const override { return "motion"; }
 
+    void process() override
+    {
+        const bool requested = motion_requested.load(std::memory_order_acquire);
+        const MotionRuntimeState state = runtime_state.load(std::memory_order_acquire);
+
+        if (requested && state == MotionRuntimeState::stopped) {
+            runtime_state.store(MotionRuntimeState::starting, std::memory_order_release);
+            model::MotionState::instance().publish({});
+            ESP_LOGI(kTag, "MOTION page opened; initializing BMI270");
+            if (start_runtime()) {
+                runtime_state.store(MotionRuntimeState::running, std::memory_order_release);
+            } else {
+                const bool cleaned = stop_runtime();
+                runtime_state.store(MotionRuntimeState::failed, std::memory_order_release);
+                if (!cleaned) {
+                    ESP_LOGE(kTag, "motion startup failed and cleanup is incomplete");
+                }
+            }
+            return;
+        }
+
+        if (!requested && state == MotionRuntimeState::running) {
+            runtime_state.store(MotionRuntimeState::stopping, std::memory_order_release);
+            if (stop_runtime()) {
+                model::MotionState::instance().publish({});
+                runtime_state.store(MotionRuntimeState::stopped, std::memory_order_release);
+                ESP_LOGI(kTag, "MOTION page closed; BMI270 stopped and released");
+            } else {
+                runtime_state.store(MotionRuntimeState::failed, std::memory_order_release);
+            }
+            return;
+        }
+
+        if (!requested && state == MotionRuntimeState::failed && !sensor_ && !task_) {
+            runtime_state.store(MotionRuntimeState::stopped, std::memory_order_release);
+        }
+    }
+
 private:
     bool on_initialize() override
+    {
+        if (!bsp::Board::instance().initialized()) {
+            ESP_LOGE(kTag, "board must be initialized before the motion module");
+            return false;
+        }
+
+        motion_requested.store(false, std::memory_order_release);
+        runtime_state.store(MotionRuntimeState::stopped, std::memory_order_release);
+        model::MotionState::instance().publish({});
+        ESP_LOGI(kTag, "BMI270 initialization deferred until the MOTION page opens");
+        return true;
+    }
+
+    bool start_runtime()
     {
         if (!bsp::Board::instance().initialized()) {
             ESP_LOGE(kTag, "board must be initialized before the motion module");
@@ -166,7 +223,7 @@ private:
 
         if (!sensor_) {
             ESP_LOGE(kTag, "BMI270 not found at 0x68/0x69: %s", esp_err_to_name(result));
-            return true; // Keep the UI available and display the sensor error state.
+            return false;
         }
 
         uint8_t chip_id = 0;
@@ -188,7 +245,7 @@ private:
                          esp_err_to_name(delete_result));
                 return false;
             }
-            return true;
+            return false;
         }
         vTaskDelay(pdMS_TO_TICKS(10)); // Wait for the first 100 Hz sample after power-on.
         ESP_ERROR_CHECK_WITHOUT_ABORT(bmi270_set_acce_bwp(sensor_, BMI270_ACC_BWP_NORM_AVG4));
@@ -208,6 +265,18 @@ private:
     }
 
     bool on_deinitialize() override
+    {
+        motion_requested.store(false, std::memory_order_release);
+        runtime_state.store(MotionRuntimeState::stopping, std::memory_order_release);
+        const bool stopped = stop_runtime();
+        model::MotionState::instance().publish({});
+        runtime_state.store(stopped ? MotionRuntimeState::stopped
+                                    : MotionRuntimeState::failed,
+                            std::memory_order_release);
+        return stopped;
+    }
+
+    bool stop_runtime()
     {
         if (task_ && !task_->stop()) {
             ESP_LOGE(kTag, "motion task did not stop before timeout");
@@ -237,6 +306,28 @@ private:
 };
 
 } // namespace
+
+void request_motion_enabled(bool enabled)
+{
+    const bool previous =
+        motion_requested.exchange(enabled, std::memory_order_acq_rel);
+    if (previous == enabled) {
+        return;
+    }
+
+    model::MotionState::instance().publish({});
+    ESP_LOGI(kTag, "motion runtime %s requested", enabled ? "start" : "stop");
+}
+
+bool motion_enabled_requested()
+{
+    return motion_requested.load(std::memory_order_acquire);
+}
+
+MotionRuntimeState motion_runtime_state()
+{
+    return runtime_state.load(std::memory_order_acquire);
+}
 
 std::unique_ptr<AppModule> create_motion_module()
 {

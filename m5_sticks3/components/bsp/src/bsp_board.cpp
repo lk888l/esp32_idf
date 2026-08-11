@@ -99,6 +99,23 @@ esp_err_t Board::enable_display_power()
     return ESP_OK;
 }
 
+esp_err_t Board::enable_5v_output()
+{
+    ESP_RETURN_ON_FALSE(initialized_ && pm1_, ESP_ERR_INVALID_STATE, kTag,
+                        "board is not initialized");
+
+    // M5PM1 register 0x06 bit 3 enables the external 5 V boost converter.
+    ESP_RETURN_ON_ERROR(update_pm1_register(0x06, 1U << 3, 0x00), kTag,
+                        "failed to enable external 5 V boost");
+    // GPIO0 and GPIO1 drive the external power path. Preserve GPIO2, which
+    // controls the LCD rail.
+    ESP_RETURN_ON_ERROR(update_pm1_register(0x10, 0x03, 0x00), kTag,
+                        "failed to enable external 5 V output path");
+
+    ESP_LOGI(kTag, "external 5 V output enabled");
+    return ESP_OK;
+}
+
 esp_err_t Board::deinitialize()
 {
     if (!initialized_ && !pm1_ && !i2c_bus_) {

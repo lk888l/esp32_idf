@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "src/wave_generator.cpp"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        bsp
+        driver
+        log
+)

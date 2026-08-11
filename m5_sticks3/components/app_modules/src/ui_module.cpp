@@ -18,7 +18,9 @@
 #include "esp_timer.h"
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
+#include "motion_runtime.hpp"
 #include "motion_state.hpp"
+#include "wave_generator.hpp"
 
 namespace app_modules {
 namespace {
@@ -28,10 +30,12 @@ constexpr uint32_t kUiUpdateMs = 16;
 constexpr uint32_t kTransitionMs = 460;
 constexpr uint32_t kCarouselDurationMs = 520;
 constexpr uint32_t kCarouselBootDurationMs = 800;
-constexpr std::array<uint32_t, 3> kAccentHex = {
+constexpr TickType_t kDutyHoldTicks = pdMS_TO_TICKS(650);
+constexpr std::array<uint32_t, 4> kAccentHex = {
     0x67E8F9,
     0xA78BFA,
     0xFB7185,
+    0x34D399,
 };
 
 lv_color_t accent(size_t index)
@@ -44,6 +48,7 @@ enum class Page : uint8_t {
     motion,
     ambient,
     system,
+    wave,
 };
 
 using AnimExec = void (*)(void*, int32_t);
@@ -190,6 +195,7 @@ public:
         create_motion_screen();
         create_ambient_screen();
         create_system_screen();
+        create_wave_screen();
 
         lv_screen_load(menu_screen_);
         current_page_ = Page::menu;
@@ -204,6 +210,15 @@ public:
 
     void destroy()
     {
+        request_motion_enabled(false);
+        auto& generator = wave::Generator::instance();
+        if (generator.initialized() && generator.enabled()) {
+            const esp_err_t result = generator.set_enabled(false);
+            if (result != ESP_OK) {
+                ESP_LOGE(kTag, "failed to mute wave outputs during UI teardown: %s",
+                         esp_err_to_name(result));
+            }
+        }
         if (carousel_timer_) {
             lv_timer_delete(carousel_timer_);
             carousel_timer_ = nullptr;
@@ -222,6 +237,7 @@ public:
         motion_screen_ = nullptr;
         ambient_screen_ = nullptr;
         system_screen_ = nullptr;
+        wave_screen_ = nullptr;
     }
 
     void key1()
@@ -237,7 +253,7 @@ public:
         }
     }
 
-    void key2()
+    void key2(bool long_press)
     {
         switch (current_page_) {
         case Page::menu:
@@ -247,6 +263,12 @@ public:
             break;
         case Page::motion: {
             const model::MotionSample sample = model::MotionState::instance().snapshot();
+            if (!sample.valid) {
+                lv_label_set_text(motion_action_label_, "WAIT FOR IMU");
+                start_animation(motion_action_label_, anim_opa, LV_OPA_COVER, LV_OPA_40,
+                                700, 250, lv_anim_path_ease_out);
+                break;
+            }
             yaw_zero_ = sample.yaw_deg;
             lv_label_set_text(motion_action_label_, "YAW ZEROED");
             start_animation(motion_action_label_, anim_opa, LV_OPA_COVER, LV_OPA_40, 900, 350,
@@ -257,6 +279,13 @@ public:
             ambient_palette_ = (ambient_palette_ + 1) % kAccentHex.size();
             lv_obj_set_style_bg_color(ambient_orb_, accent(ambient_palette_), 0);
             lv_obj_set_style_arc_color(ambient_arc_a_, accent(ambient_palette_), LV_PART_INDICATOR);
+            break;
+        case Page::wave:
+            if (long_press) {
+                advance_wave_duty();
+            } else {
+                advance_wave_frequency();
+            }
             break;
         case Page::system:
             break;
@@ -340,8 +369,10 @@ private:
         start_loop_animation(selector_glow_, anim_border_opa, LV_OPA_20, LV_OPA_70,
                              1100, 1100);
 
-        constexpr std::array<const char*, 3> symbols = {LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS};
-        constexpr std::array<const char*, 3> titles = {"MOTION", "AURA", "SYSTEM"};
+        constexpr std::array<const char*, 4> symbols = {
+            LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS, LV_SYMBOL_SHUFFLE};
+        constexpr std::array<const char*, 4> titles = {
+            "MOTION", "AURA", "SYSTEM", "WAVE"};
         for (size_t index = 0; index < cards_.size(); ++index) {
             lv_obj_t* card = create_glass_panel(menu_screen_, 31, 148, 72, 72);
             cards_[index] = card;
@@ -381,8 +412,8 @@ private:
         lv_obj_t* title = create_label(motion_screen_, "ATTITUDE / DEG", &lv_font_montserrat_14,
                                        lv_color_hex(0xEEF8FF));
         lv_obj_set_pos(title, 8, 7);
-        motion_status_label_ = create_label(motion_screen_, "VQF 6D / WAIT", &lv_font_montserrat_12,
-                                            accent(0));
+        motion_status_label_ = create_label(motion_screen_, "BMI270 / SLEEP",
+                                            &lv_font_montserrat_12, lv_color_hex(0x73859B));
         lv_obj_set_pos(motion_status_label_, 8, 29);
 
         lv_obj_t* attitude_panel = create_glass_panel(motion_screen_, 23, 49, 88, 88);
@@ -560,6 +591,91 @@ private:
         lv_obj_set_pos(hint, 0, 220);
     }
 
+    void create_wave_screen()
+    {
+        wave_screen_ = lv_obj_create(nullptr);
+        screens_[4] = wave_screen_;
+        style_screen(wave_screen_, lv_color_hex(0x041512), lv_color_hex(0x10233A));
+
+        lv_obj_t* glow = lv_obj_create(wave_screen_);
+        lv_obj_set_size(glow, 104, 104);
+        lv_obj_set_pos(glow, 73, -47);
+        lv_obj_set_style_radius(glow, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(glow, accent(3), 0);
+        lv_obj_set_style_bg_opa(glow, LV_OPA_10, 0);
+        lv_obj_set_style_border_width(glow, 0, 0);
+
+        lv_obj_t* title = create_label(wave_screen_, "SIGNAL LAB",
+                                       &lv_font_montserrat_12, lv_color_hex(0xDDFBF2));
+        lv_obj_set_pos(title, 8, 8);
+        wave_status_dot_ = lv_obj_create(wave_screen_);
+        lv_obj_set_pos(wave_status_dot_, 98, 11);
+        lv_obj_set_size(wave_status_dot_, 6, 6);
+        lv_obj_set_style_radius(wave_status_dot_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(wave_status_dot_, 0, 0);
+        wave_status_label_ = create_label(wave_screen_, "OFF", &lv_font_montserrat_12,
+                                          lv_color_hex(0x73859B));
+        lv_obj_set_pos(wave_status_label_, 108, 7);
+
+        wave_duty_label_ = create_label(wave_screen_, "DUTY 50% / 2-BIT",
+                                        &lv_font_montserrat_12, lv_color_hex(0x6D8791));
+        lv_obj_set_pos(wave_duty_label_, 8, 29);
+
+        wave_scope_ = create_glass_panel(wave_screen_, 8, 49, 119, 94);
+        lv_obj_set_style_border_color(wave_scope_, accent(3), 0);
+        lv_obj_set_style_border_opa(wave_scope_, LV_OPA_40, 0);
+        wave_frequency_label_ = create_label(wave_scope_, "1.000", &lv_font_montserrat_24,
+                                              lv_color_hex(0xF0FFF9));
+        lv_obj_set_pos(wave_frequency_label_, 8, 6);
+        wave_unit_label_ = create_label(wave_scope_, "MHz", &lv_font_montserrat_12,
+                                        accent(3));
+        lv_obj_set_pos(wave_unit_label_, 83, 15);
+
+        constexpr std::array<int, 9> segment_x = {8, 27, 27, 50, 50, 73, 73, 96, 96};
+        constexpr std::array<int, 9> segment_y = {62, 35, 35, 35, 62, 35, 35, 35, 62};
+        constexpr std::array<int, 9> segment_w = {19, 2, 23, 2, 23, 2, 23, 2, 15};
+        constexpr std::array<int, 9> segment_h = {2, 29, 2, 29, 2, 29, 2, 29, 2};
+        for (size_t index = 0; index < wave_segments_.size(); ++index) {
+            lv_obj_t* segment = lv_obj_create(wave_scope_);
+            wave_segments_[index] = segment;
+            lv_obj_set_pos(segment, segment_x[index], segment_y[index]);
+            lv_obj_set_size(segment, segment_w[index], segment_h[index]);
+            lv_obj_set_style_radius(segment, 2, 0);
+            lv_obj_set_style_bg_color(segment, accent(3), 0);
+            lv_obj_set_style_bg_opa(segment, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(segment, 0, 0);
+            lv_obj_set_style_shadow_color(segment, accent(3), 0);
+            lv_obj_set_style_shadow_width(segment, 5, 0);
+            lv_obj_set_style_shadow_opa(segment, LV_OPA_40, 0);
+        }
+
+        lv_obj_t* output_panel = create_glass_panel(wave_screen_, 8, 151, 119, 51);
+        lv_obj_t* output_title = create_label(output_panel, "OUTPUT BUS", &lv_font_montserrat_12,
+                                               lv_color_hex(0x71879A));
+        lv_obj_set_pos(output_title, 7, 3);
+        constexpr std::array<const char*, 3> output_names = {"G4", "G5", "5V"};
+        constexpr std::array<int, 3> output_x = {7, 43, 79};
+        for (size_t index = 0; index < output_names.size(); ++index) {
+            lv_obj_t* chip = create_glass_panel(output_panel, output_x[index], 23, 31, 20);
+            lv_obj_set_style_radius(chip, 10, 0);
+            lv_obj_set_style_bg_color(chip, index == 2 ? lv_color_hex(0x16352B)
+                                                       : lv_color_hex(0x12312E), 0);
+            lv_obj_set_style_border_color(chip, accent(3), 0);
+            lv_obj_set_style_border_opa(chip, index == 2 ? LV_OPA_40 : LV_OPA_70, 0);
+            lv_obj_t* label = create_label(chip, output_names[index], &lv_font_montserrat_12,
+                                           index == 2 ? lv_color_hex(0xA7C9BC) : accent(3));
+            lv_obj_center(label);
+        }
+
+        lv_obj_t* hint = create_label(wave_screen_, "K1 BACK  K2 F/HOLD D", &lv_font_montserrat_12,
+                                      lv_color_hex(0x708799));
+        lv_obj_set_width(hint, bsp::kDisplayWidth);
+        lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(hint, 0, 220);
+
+        update_wave_display();
+    }
+
     void advance_carousel()
     {
         selected_ = (selected_ + 1) % static_cast<int>(cards_.size());
@@ -570,28 +686,27 @@ private:
 
     void update_carousel(bool boot)
     {
-        constexpr std::array<int, 3> x_positions = {31, 105, -43};
-        constexpr std::array<const char*, 3> descriptions = {
-            "100 Hz VQF fusion",
+        constexpr std::array<const char*, 4> descriptions = {
+            "On-demand 100 Hz VQF",
             "Layered aura animation",
             "Memory and uptime",
+            "G4 + G5 square wave",
         };
         lv_obj_move_foreground(cards_[selected_]);
         for (size_t index = 0; index < cards_.size(); ++index) {
-            const int relative = (static_cast<int>(index) - selected_ + 3) % 3;
+            const int item_count = static_cast<int>(cards_.size());
+            const int relative =
+                (static_cast<int>(index) - selected_ + item_count) % item_count;
             lv_obj_t* card = cards_[index];
-            const int target_x = x_positions[relative];
+            const bool is_selected = relative == 0;
+            const bool is_neighbor = relative == 1 || relative == item_count - 1;
+            const int target_x = is_selected ? 31
+                                             : relative == 1 ? 105
+                                                             : relative == item_count - 1 ? -43 : 179;
             const int target_y = relative == 0 ? 66 : 74;
-            const int target_scale = relative == 0 ? 256 : 214;
-            const int target_opa = relative == 0 ? LV_OPA_COVER : LV_OPA_50;
-            if (!boot && relative == 1) {
-                lv_anim_delete(card, nullptr);
-                lv_obj_set_x(card, target_x);
-                lv_obj_set_y(card, target_y);
-                lv_obj_set_style_transform_scale(card, target_scale, 0);
-                lv_obj_set_style_opa(card, static_cast<lv_opa_t>(target_opa), 0);
-                continue;
-            }
+            const int target_scale = is_selected ? 256 : is_neighbor ? 214 : 190;
+            const int target_opa = is_selected ? LV_OPA_COVER
+                                               : is_neighbor ? LV_OPA_50 : LV_OPA_TRANSP;
 
             const uint32_t delay = boot ? 90 + index * 75 : 0;
             const int from_y = boot ? 148 : lv_obj_get_y(card);
@@ -628,16 +743,23 @@ private:
         switch (selected_) {
         case 0:
             current_page_ = Page::motion;
+            prepare_motion_display();
+            request_motion_enabled(true);
             target = motion_screen_;
             break;
         case 1:
             current_page_ = Page::ambient;
             target = ambient_screen_;
             break;
-        default:
+        case 2:
             current_page_ = Page::system;
             target = system_screen_;
             update_system();
+            break;
+        default:
+            current_page_ = Page::wave;
+            target = wave_screen_;
+            set_wave_output(true);
             break;
         }
         lv_screen_load_anim(target, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, kTransitionMs, 0, false);
@@ -645,8 +767,132 @@ private:
 
     void show_menu()
     {
+        if (current_page_ == Page::motion) {
+            request_motion_enabled(false);
+        } else if (current_page_ == Page::wave) {
+            set_wave_output(false);
+        }
         current_page_ = Page::menu;
         lv_screen_load_anim(menu_screen_, LV_SCREEN_LOAD_ANIM_MOVE_RIGHT, kTransitionMs, 0, false);
+    }
+
+    void update_wave_display()
+    {
+        auto& generator = wave::Generator::instance();
+        const uint32_t frequency_hz = generator.frequency_hz();
+        if (frequency_hz >= 1'000'000) {
+            lv_label_set_text_fmt(wave_frequency_label_, "%lu.%03lu",
+                                  static_cast<unsigned long>(frequency_hz / 1'000'000),
+                                  static_cast<unsigned long>((frequency_hz % 1'000'000) / 1'000));
+            lv_label_set_text(wave_unit_label_, "MHz");
+        } else {
+            lv_label_set_text_fmt(wave_frequency_label_, "%lu",
+                                  static_cast<unsigned long>(frequency_hz / 1'000));
+            lv_label_set_text(wave_unit_label_, "kHz");
+        }
+
+        lv_label_set_text_fmt(wave_duty_label_, "DUTY %u%% / 2-BIT",
+                              generator.duty_percent());
+        wave_enabled_ = generator.enabled();
+        const lv_color_t state_color =
+            wave_enabled_ ? accent(3) : lv_color_hex(0x607686);
+        lv_label_set_text(wave_status_label_, wave_enabled_ ? "LIVE" : "OFF");
+        lv_obj_set_style_text_color(wave_status_label_, state_color, 0);
+        lv_obj_set_style_bg_color(wave_status_dot_, state_color, 0);
+        lv_obj_set_style_bg_opa(wave_status_dot_, wave_enabled_ ? LV_OPA_COVER : LV_OPA_50, 0);
+        lv_obj_set_style_shadow_color(wave_status_dot_, state_color, 0);
+        lv_obj_set_style_shadow_width(wave_status_dot_, wave_enabled_ ? 10 : 0, 0);
+        lv_obj_set_style_shadow_opa(wave_status_dot_, wave_enabled_ ? LV_OPA_70 : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_opa(wave_scope_, wave_enabled_ ? LV_OPA_60 : LV_OPA_30, 0);
+        for (lv_obj_t* segment : wave_segments_) {
+            lv_obj_set_style_bg_opa(segment, wave_enabled_ ? LV_OPA_COVER : LV_OPA_30, 0);
+            lv_obj_set_style_shadow_opa(segment, wave_enabled_ ? LV_OPA_40 : LV_OPA_TRANSP, 0);
+        }
+    }
+
+    void show_wave_error(const char* operation, esp_err_t result)
+    {
+        wave_enabled_ = wave::Generator::instance().enabled();
+        ESP_LOGE(kTag, "wave generator %s failed: %s", operation, esp_err_to_name(result));
+        lv_label_set_text(wave_status_label_, "ERR");
+        lv_obj_set_style_text_color(wave_status_label_, accent(2), 0);
+        lv_obj_set_style_bg_color(wave_status_dot_, accent(2), 0);
+        lv_obj_set_style_bg_opa(wave_status_dot_, LV_OPA_COVER, 0);
+    }
+
+    void set_wave_output(bool enabled)
+    {
+        const esp_err_t result = wave::Generator::instance().set_enabled(enabled);
+        if (result != ESP_OK) {
+            show_wave_error(enabled ? "enable" : "mute", result);
+            return;
+        }
+        update_wave_display();
+    }
+
+    void advance_wave_frequency()
+    {
+        const size_t next_index =
+            (wave_frequency_index_ + 1) % wave::kFrequencyPresetsHz.size();
+        const uint32_t requested_hz = wave::kFrequencyPresetsHz[next_index];
+        const esp_err_t result = wave::Generator::instance().set_frequency(requested_hz);
+        if (result != ESP_OK) {
+            show_wave_error("frequency update", result);
+            return;
+        }
+
+        wave_frequency_index_ = next_index;
+        update_wave_display();
+        for (size_t index = 0; index < wave_segments_.size(); ++index) {
+            start_animation(wave_segments_[index], anim_opa, LV_OPA_20, LV_OPA_COVER,
+                            240, static_cast<uint32_t>(index * 16));
+        }
+    }
+
+    void advance_wave_duty()
+    {
+        const size_t next_index =
+            (wave_duty_index_ + 1) % wave::kDutyPresetsPercent.size();
+        const uint8_t requested_percent = wave::kDutyPresetsPercent[next_index];
+        const esp_err_t result =
+            wave::Generator::instance().set_duty_percent(requested_percent);
+        if (result != ESP_OK) {
+            show_wave_error("duty update", result);
+            return;
+        }
+
+        wave_duty_index_ = next_index;
+        update_wave_display();
+        start_animation(wave_duty_label_, anim_opa, LV_OPA_20, LV_OPA_COVER, 260);
+        start_animation(wave_scope_, anim_border_opa, LV_OPA_20, LV_OPA_70, 300);
+    }
+
+    void prepare_motion_display()
+    {
+        lv_label_set_text(motion_status_label_, "BMI270 / STARTING");
+        lv_obj_set_style_text_color(motion_status_label_, accent(0), 0);
+        lv_label_set_text(angles_label_, "ROLL    --.-\nPITCH   --.-\nYAW     --.-");
+        lv_label_set_text(raw_label_, "a  --.- --.- --.-");
+        lv_label_set_text(motion_action_label_, "K1 BACK   K2 ZERO YAW");
+
+        yaw_zero_ = 0.0f;
+        smoothed_roll_ = 0.0f;
+        smoothed_pitch_ = 0.0f;
+        smoothed_yaw_ = 0.0f;
+        displayed_roll_ = std::numeric_limits<int32_t>::min();
+        displayed_pitch_ = std::numeric_limits<int32_t>::min();
+        displayed_yaw_ = std::numeric_limits<int32_t>::min();
+        displayed_ax_ = std::numeric_limits<int32_t>::min();
+        displayed_ay_ = std::numeric_limits<int32_t>::min();
+        displayed_az_ = std::numeric_limits<int32_t>::min();
+        displayed_horizon_rotation_ = 0;
+        displayed_pitch_offset_ = 0;
+        motion_status_state_ = -1;
+
+        lv_obj_set_style_transform_rotation(horizon_line_, 0, 0);
+        lv_obj_set_y(horizon_line_, 36);
+        lv_obj_set_y(attitude_sky_, 8);
+        start_animation(attitude_clip_, anim_border_opa, LV_OPA_20, LV_OPA_60, 500);
     }
 
     static float approach_angle(float current, float target, float gain)
@@ -663,12 +909,37 @@ private:
 
     void update_motion()
     {
+        const MotionRuntimeState runtime = motion_runtime_state();
         const model::MotionSample sample = model::MotionState::instance().snapshot();
-        if (!sample.valid) {
-            if (motion_status_state_ != 2) {
-                lv_label_set_text(motion_status_label_, "BMI270 / OFFLINE");
-                lv_obj_set_style_text_color(motion_status_label_, accent(2), 0);
-                motion_status_state_ = 2;
+        if (runtime != MotionRuntimeState::running || !sample.valid) {
+            const char* status_text = "BMI270 / SLEEP";
+            lv_color_t status_color = lv_color_hex(0x73859B);
+            int8_t status_state = 6;
+
+            if (runtime == MotionRuntimeState::failed) {
+                status_text = "BMI270 / ERROR";
+                status_color = accent(2);
+                status_state = 5;
+            } else if (runtime == MotionRuntimeState::starting ||
+                       (runtime == MotionRuntimeState::stopped &&
+                        motion_enabled_requested())) {
+                status_text = "BMI270 / STARTING";
+                status_color = accent(0);
+                status_state = 2;
+            } else if (runtime == MotionRuntimeState::stopping) {
+                status_text = "BMI270 / STOPPING";
+                status_color = lv_color_hex(0x73859B);
+                status_state = 4;
+            } else if (runtime == MotionRuntimeState::running) {
+                status_text = "VQF 6D / WARMUP";
+                status_color = accent(1);
+                status_state = 3;
+            }
+
+            if (motion_status_state_ != status_state) {
+                lv_label_set_text(motion_status_label_, status_text);
+                lv_obj_set_style_text_color(motion_status_label_, status_color, 0);
+                motion_status_state_ = status_state;
             }
             return;
         }
@@ -746,12 +1017,13 @@ private:
         lv_label_set_text_fmt(uptime_label_, "UP    %llu s", uptime_seconds);
     }
 
-    std::array<lv_obj_t*, 4> screens_{};
+    std::array<lv_obj_t*, 5> screens_{};
     lv_obj_t* menu_screen_ = nullptr;
     lv_obj_t* motion_screen_ = nullptr;
     lv_obj_t* ambient_screen_ = nullptr;
     lv_obj_t* system_screen_ = nullptr;
-    std::array<lv_obj_t*, 3> cards_{};
+    lv_obj_t* wave_screen_ = nullptr;
+    std::array<lv_obj_t*, 4> cards_{};
     lv_obj_t* selector_glow_ = nullptr;
     lv_obj_t* menu_hint_ = nullptr;
 
@@ -762,6 +1034,17 @@ private:
     lv_obj_t* angles_label_ = nullptr;
     lv_obj_t* raw_label_ = nullptr;
     lv_obj_t* motion_action_label_ = nullptr;
+
+    lv_obj_t* wave_scope_ = nullptr;
+    lv_obj_t* wave_status_dot_ = nullptr;
+    lv_obj_t* wave_status_label_ = nullptr;
+    lv_obj_t* wave_frequency_label_ = nullptr;
+    lv_obj_t* wave_unit_label_ = nullptr;
+    lv_obj_t* wave_duty_label_ = nullptr;
+    std::array<lv_obj_t*, 9> wave_segments_{};
+    size_t wave_frequency_index_ = 3;
+    size_t wave_duty_index_ = 1;
+    bool wave_enabled_ = false;
 
     lv_obj_t* ambient_orb_ = nullptr;
     lv_obj_t* ambient_arc_a_ = nullptr;
@@ -803,10 +1086,27 @@ private:
     static void button_event_callback(void* context, const app::ButtonEvent& event)
     {
         auto* self = static_cast<UiModule*>(context);
-        if (event.action != app::ButtonAction::released || !self->controller_) {
+        if (!self->controller_) {
             return;
         }
 
+        if (event.id == app::ButtonId::key2 &&
+            event.action == app::ButtonAction::pressed) {
+            self->key2_pressed_at_ = event.timestamp;
+            self->key2_pressed_ = true;
+            return;
+        }
+        if (event.action != app::ButtonAction::released) {
+            return;
+        }
+
+        bool key2_long_press = false;
+        if (event.id == app::ButtonId::key2) {
+            key2_long_press =
+                self->key2_pressed_ &&
+                event.timestamp - self->key2_pressed_at_ >= kDutyHoldTicks;
+            self->key2_pressed_ = false;
+        }
         if (!lvgl_port_lock(100)) {
             ESP_LOGW(kTag, "LVGL lock timeout while handling button event");
             return;
@@ -815,7 +1115,7 @@ private:
         if (event.id == app::ButtonId::key1) {
             self->controller_->key1();
         } else if (event.id == app::ButtonId::key2) {
-            self->controller_->key2();
+            self->controller_->key2(key2_long_press);
         }
         lvgl_port_unlock();
     }
@@ -877,6 +1177,8 @@ private:
     app::ButtonEventBus& event_bus_;
     app::ButtonEventBus::Subscription button_subscription_{};
     std::unique_ptr<UiController> controller_;
+    TickType_t key2_pressed_at_ = 0;
+    bool key2_pressed_ = false;
 };
 
 } // namespace

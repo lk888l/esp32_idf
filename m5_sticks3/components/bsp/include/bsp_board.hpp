@@ -32,6 +32,7 @@ public:
     esp_err_t initialize();
     esp_err_t deinitialize();
     esp_err_t enable_display_power();
+    esp_err_t enable_5v_output();
 
     bool initialized() const { return initialized_; }
     i2c_master_bus_handle_t i2c_bus() const { return i2c_bus_; }

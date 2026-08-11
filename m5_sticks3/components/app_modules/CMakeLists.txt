@@ -4,6 +4,7 @@ idf_component_register(
         "src/button_module.cpp"
         "src/motion_module.cpp"
         "src/ui_module.cpp"
+        "src/wave_module.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -16,4 +17,5 @@ idf_component_register(
         vqf
         esp_timer
         heap
+        wave_generator
 )
