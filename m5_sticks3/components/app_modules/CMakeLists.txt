@@ -17,5 +17,10 @@ idf_component_register(
         vqf
         esp_timer
         heap
+        mini_games
         wave_generator
 )
+
+if(M5_STICKS3_HW_SMOKE_TEST)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE M5_STICKS3_HW_SMOKE_TEST=1)
+endif()

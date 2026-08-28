@@ -6,6 +6,7 @@ add_executable(app_host_tests
     host_tests.cpp
     ../components/app/src/app_manager.cpp
     ../components/app/src/button_event_bus.cpp
+    ../components/mini_games/src/mini_games.cpp
 )
 
 target_compile_features(app_host_tests PRIVATE cxx_std_20)
@@ -13,6 +14,7 @@ target_compile_options(app_host_tests PRIVATE -Wall -Wextra -Werror)
 target_include_directories(app_host_tests PRIVATE
     stubs
     ../components/app/include
+    ../components/mini_games/include
 )
 
 enable_testing()

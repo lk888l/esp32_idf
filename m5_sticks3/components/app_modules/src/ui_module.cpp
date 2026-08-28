@@ -14,10 +14,12 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
+#include "mini_games.hpp"
 #include "motion_runtime.hpp"
 #include "motion_state.hpp"
 #include "wave_generator.hpp"
@@ -30,12 +32,13 @@ constexpr uint32_t kUiUpdateMs = 16;
 constexpr uint32_t kTransitionMs = 460;
 constexpr uint32_t kCarouselDurationMs = 520;
 constexpr uint32_t kCarouselBootDurationMs = 800;
-constexpr TickType_t kDutyHoldTicks = pdMS_TO_TICKS(650);
-constexpr std::array<uint32_t, 4> kAccentHex = {
+constexpr TickType_t kLongPressTicks = pdMS_TO_TICKS(650);
+constexpr std::array<uint32_t, 5> kAccentHex = {
     0x67E8F9,
     0xA78BFA,
     0xFB7185,
     0x34D399,
+    0xFBBF24,
 };
 
 lv_color_t accent(size_t index)
@@ -49,6 +52,8 @@ enum class Page : uint8_t {
     ambient,
     system,
     wave,
+    arcade,
+    game,
 };
 
 using AnimExec = void (*)(void*, int32_t);
@@ -187,6 +192,15 @@ lv_obj_t* create_glass_panel(lv_obj_t* parent, int x, int y, int width, int heig
     return panel;
 }
 
+void set_visible(lv_obj_t* object, bool visible)
+{
+    if (visible) {
+        lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 class UiController {
 public:
     bool create()
@@ -196,6 +210,8 @@ public:
         create_ambient_screen();
         create_system_screen();
         create_wave_screen();
+        create_arcade_screen();
+        create_game_screen();
 
         lv_screen_load(menu_screen_);
         current_page_ = Page::menu;
@@ -205,6 +221,9 @@ public:
             destroy();
             return false;
         }
+#ifdef M5_STICKS3_HW_SMOKE_TEST
+        start_hardware_smoke_test();
+#endif
         return true;
     }
 
@@ -227,6 +246,12 @@ public:
             lv_timer_delete(update_timer_);
             update_timer_ = nullptr;
         }
+#ifdef M5_STICKS3_HW_SMOKE_TEST
+        if (smoke_timer_) {
+            lv_timer_delete(smoke_timer_);
+            smoke_timer_ = nullptr;
+        }
+#endif
         for (lv_obj_t*& screen : screens_) {
             if (screen) {
                 lv_obj_delete(screen);
@@ -238,6 +263,8 @@ public:
         ambient_screen_ = nullptr;
         system_screen_ = nullptr;
         wave_screen_ = nullptr;
+        arcade_screen_ = nullptr;
+        game_screen_ = nullptr;
     }
 
     void key1()
@@ -248,8 +275,28 @@ public:
                 return;
             }
             advance_carousel();
+        } else if (current_page_ == Page::arcade) {
+            advance_arcade();
+        } else if (current_page_ == Page::game) {
+            show_arcade();
         } else {
             show_menu();
+        }
+    }
+
+    void key2_pressed()
+    {
+        if (current_page_ != Page::game || game_waiting_for_motion_) {
+            return;
+        }
+
+        if (active_game_ == mini_games::GameId::meteor_dodge) {
+            if (meteor_dodge_.activate_shield()) {
+                lv_label_set_text(game_status_label_, "SHIELD ACTIVE");
+                start_animation(game_status_label_, anim_opa, LV_OPA_COVER, LV_OPA_50, 520);
+            }
+        } else if (active_game_ == mini_games::GameId::tap_runner) {
+            tap_runner_.jump();
         }
     }
 
@@ -289,6 +336,28 @@ public:
             break;
         case Page::system:
             break;
+        case Page::arcade:
+            if (long_press) {
+                show_menu();
+            } else {
+                open_arcade_game();
+            }
+            break;
+        case Page::game:
+            if (long_press) {
+                restart_current_game();
+            } else if (current_game_state() != mini_games::RunState::playing) {
+                restart_current_game();
+            } else if (active_game_ == mini_games::GameId::tilt_quest) {
+                const model::MotionSample sample = model::MotionState::instance().snapshot();
+                if (sample.valid) {
+                    calibrate_game_motion(sample);
+                    lv_label_set_text(game_status_label_, "CENTERED");
+                    start_animation(game_status_label_, anim_opa, LV_OPA_COVER, LV_OPA_50,
+                                    520);
+                }
+            }
+            break;
         }
     }
 
@@ -313,12 +382,61 @@ private:
         }
     }
 
+#ifdef M5_STICKS3_HW_SMOKE_TEST
+    static void smoke_timer_callback(lv_timer_t* timer)
+    {
+        static_cast<UiController*>(lv_timer_get_user_data(timer))->
+            advance_hardware_smoke_test();
+    }
+
+    void start_hardware_smoke_test()
+    {
+        active_game_ = mini_games::GameId::tilt_quest;
+        current_page_ = Page::game;
+        configure_game_objects();
+        restart_current_game();
+        lv_screen_load(game_screen_);
+        smoke_step_ = 0;
+        smoke_timer_ = lv_timer_create(smoke_timer_callback, 4000, this);
+        ESP_LOGI(kTag, "HW smoke 1/3: TILT QUEST");
+    }
+
+    void advance_hardware_smoke_test()
+    {
+        ++smoke_step_;
+        if (smoke_step_ == 1) {
+            active_game_ = mini_games::GameId::meteor_dodge;
+            configure_game_objects();
+            restart_current_game();
+            ESP_LOGI(kTag, "HW smoke 2/3: METEOR DODGE");
+            return;
+        }
+        if (smoke_step_ == 2) {
+            active_game_ = mini_games::GameId::tap_runner;
+            configure_game_objects();
+            restart_current_game();
+            tap_runner_.jump();
+            ESP_LOGI(kTag, "HW smoke 3/3: TAP RUNNER");
+            return;
+        }
+
+        request_motion_enabled(false);
+        current_page_ = Page::menu;
+        lv_screen_load(menu_screen_);
+        lv_timer_delete(smoke_timer_);
+        smoke_timer_ = nullptr;
+        ESP_LOGI(kTag, "HW smoke complete: all game pages exercised");
+    }
+#endif
+
     void update()
     {
         if (current_page_ == Page::motion) {
             update_motion();
         } else if (current_page_ == Page::system) {
             update_system();
+        } else if (current_page_ == Page::game) {
+            update_game();
         }
     }
 
@@ -369,10 +487,11 @@ private:
         start_loop_animation(selector_glow_, anim_border_opa, LV_OPA_20, LV_OPA_70,
                              1100, 1100);
 
-        constexpr std::array<const char*, 4> symbols = {
-            LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS, LV_SYMBOL_SHUFFLE};
-        constexpr std::array<const char*, 4> titles = {
-            "MOTION", "AURA", "SYSTEM", "WAVE"};
+        constexpr std::array<const char*, 5> symbols = {
+            LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS,
+            LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY};
+        constexpr std::array<const char*, 5> titles = {
+            "MOTION", "AURA", "SYSTEM", "WAVE", "ARCADE"};
         for (size_t index = 0; index < cards_.size(); ++index) {
             lv_obj_t* card = create_glass_panel(menu_screen_, 31, 148, 72, 72);
             cards_[index] = card;
@@ -676,6 +795,392 @@ private:
         update_wave_display();
     }
 
+    void create_arcade_screen()
+    {
+        arcade_screen_ = lv_obj_create(nullptr);
+        screens_[5] = arcade_screen_;
+        style_screen(arcade_screen_, lv_color_hex(0x120C08), lv_color_hex(0x25112A));
+
+        lv_obj_t* title = create_label(arcade_screen_, "POCKET ARCADE",
+                                       &lv_font_montserrat_14, lv_color_hex(0xFFF7ED));
+        lv_obj_set_pos(title, 8, 8);
+        lv_obj_t* badge = create_label(arcade_screen_, "3 MICRO GAMES",
+                                       &lv_font_montserrat_12, accent(4));
+        lv_obj_set_pos(badge, 8, 29);
+
+        arcade_panel_ = create_glass_panel(arcade_screen_, 8, 50, 119, 143);
+        lv_obj_set_style_border_color(arcade_panel_, accent(4), 0);
+        lv_obj_set_style_transform_pivot_x(arcade_panel_, 59, 0);
+        lv_obj_set_style_transform_pivot_y(arcade_panel_, 71, 0);
+
+        arcade_index_label_ = create_label(arcade_panel_, "01 / 03",
+                                           &lv_font_montserrat_12,
+                                           lv_color_hex(0x8796AD));
+        lv_obj_set_pos(arcade_index_label_, 8, 7);
+        arcade_icon_ = create_label(arcade_panel_, LV_SYMBOL_GPS,
+                                    &lv_font_montserrat_24, accent(4));
+        lv_obj_align(arcade_icon_, LV_ALIGN_TOP_MID, 0, 27);
+        arcade_name_label_ = create_label(arcade_panel_, "TILT QUEST",
+                                          &lv_font_montserrat_16,
+                                          lv_color_hex(0xFFF7ED));
+        lv_obj_set_width(arcade_name_label_, 119);
+        lv_obj_set_style_text_align(arcade_name_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(arcade_name_label_, 0, 61);
+        arcade_description_label_ = create_label(
+            arcade_panel_, "Tilt through the maze\nand collect 5 beacons",
+            &lv_font_montserrat_12, lv_color_hex(0xA8B3C7));
+        lv_obj_set_width(arcade_description_label_, 107);
+        lv_obj_set_style_text_align(arcade_description_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(arcade_description_label_, 6, 87);
+
+        for (size_t index = 0; index < arcade_dots_.size(); ++index) {
+            lv_obj_t* dot = lv_obj_create(arcade_panel_);
+            arcade_dots_[index] = dot;
+            lv_obj_set_pos(dot, 45 + static_cast<int>(index) * 13, 127);
+            lv_obj_set_size(dot, 6, 6);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+        }
+
+        lv_obj_t* controls = create_label(arcade_screen_, "K1 NEXT   K2 PLAY\nHOLD K2: MAIN MENU",
+                                          &lv_font_montserrat_12,
+                                          lv_color_hex(0x766E82));
+        lv_obj_set_width(controls, bsp::kDisplayWidth);
+        lv_obj_set_style_text_align(controls, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_line_space(controls, 0, 0);
+        lv_obj_set_pos(controls, 0, 209);
+        update_arcade_selector(true);
+    }
+
+    void create_game_screen()
+    {
+        game_screen_ = lv_obj_create(nullptr);
+        screens_[6] = game_screen_;
+        style_screen(game_screen_, lv_color_hex(0x070C16), lv_color_hex(0x151023));
+
+        game_title_label_ = create_label(game_screen_, "TILT QUEST",
+                                         &lv_font_montserrat_14,
+                                         lv_color_hex(0xF8FAFC));
+        lv_obj_set_pos(game_title_label_, 8, 7);
+        game_score_label_ = create_label(game_screen_, "0 / 5",
+                                         &lv_font_montserrat_14, accent(4));
+        lv_obj_set_width(game_score_label_, 65);
+        lv_obj_set_style_text_align(game_score_label_, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_pos(game_score_label_, 62, 7);
+        game_status_label_ = create_label(game_screen_, "READY",
+                                          &lv_font_montserrat_12,
+                                          lv_color_hex(0x8392A8));
+        lv_obj_set_pos(game_status_label_, 8, 27);
+
+        game_field_ = create_glass_panel(game_screen_, 8, 43, 119, 164);
+        lv_obj_set_style_radius(game_field_, 12, 0);
+        lv_obj_set_style_bg_color(game_field_, lv_color_hex(0x071421), 0);
+        lv_obj_set_style_bg_opa(game_field_, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(game_field_, accent(4), 0);
+
+        tilt_quest_.reset(1);
+        tilt_goal_ = lv_obj_create(game_field_);
+        lv_obj_set_size(tilt_goal_, 15, 15);
+        lv_obj_set_style_radius(tilt_goal_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(tilt_goal_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(tilt_goal_, 3, 0);
+        lv_obj_set_style_border_color(tilt_goal_, accent(4), 0);
+        lv_obj_set_style_shadow_color(tilt_goal_, accent(4), 0);
+        lv_obj_set_style_shadow_width(tilt_goal_, 7, 0);
+        lv_obj_set_style_shadow_opa(tilt_goal_, LV_OPA_50, 0);
+
+        for (size_t index = 0; index < tilt_walls_.size(); ++index) {
+            const mini_games::Rect& wall = tilt_quest_.walls()[index];
+            lv_obj_t* object = lv_obj_create(game_field_);
+            tilt_walls_[index] = object;
+            lv_obj_set_pos(object, 2 + static_cast<int>(wall.x),
+                           2 + static_cast<int>(wall.y));
+            lv_obj_set_size(object, static_cast<int>(wall.width),
+                            static_cast<int>(wall.height));
+            lv_obj_set_style_radius(object, 4, 0);
+            lv_obj_set_style_bg_color(object, lv_color_hex(0x30405A), 0);
+            lv_obj_set_style_bg_opa(object, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(object, 0, 0);
+        }
+
+        tilt_ball_ = lv_obj_create(game_field_);
+        lv_obj_set_size(tilt_ball_, 10, 10);
+        lv_obj_set_style_radius(tilt_ball_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(tilt_ball_, lv_color_hex(0xF8FAFC), 0);
+        lv_obj_set_style_border_width(tilt_ball_, 0, 0);
+        lv_obj_set_style_shadow_color(tilt_ball_, accent(0), 0);
+        lv_obj_set_style_shadow_width(tilt_ball_, 8, 0);
+        lv_obj_set_style_shadow_opa(tilt_ball_, LV_OPA_70, 0);
+
+        meteor_player_ = lv_obj_create(game_field_);
+        lv_obj_set_size(meteor_player_, 13, 11);
+        lv_obj_set_style_radius(meteor_player_, 4, 0);
+        lv_obj_set_style_bg_color(meteor_player_, accent(4), 0);
+        lv_obj_set_style_border_width(meteor_player_, 1, 0);
+        lv_obj_set_style_border_color(meteor_player_, lv_color_hex(0xFFF7D6), 0);
+
+        meteor_shield_ = lv_obj_create(game_field_);
+        lv_obj_set_size(meteor_shield_, 22, 22);
+        lv_obj_set_style_radius(meteor_shield_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(meteor_shield_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(meteor_shield_, 2, 0);
+        lv_obj_set_style_border_color(meteor_shield_, accent(0), 0);
+        lv_obj_set_style_shadow_color(meteor_shield_, accent(0), 0);
+        lv_obj_set_style_shadow_width(meteor_shield_, 8, 0);
+        lv_obj_set_style_shadow_opa(meteor_shield_, LV_OPA_70, 0);
+
+        for (size_t index = 0; index < meteor_objects_.size(); ++index) {
+            lv_obj_t* meteor = lv_obj_create(game_field_);
+            meteor_objects_[index] = meteor;
+            lv_obj_set_size(meteor, 9, 9);
+            lv_obj_set_style_radius(meteor, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(meteor, index % 2 == 0 ? accent(2)
+                                                             : lv_color_hex(0xF97316), 0);
+            lv_obj_set_style_border_width(meteor, 0, 0);
+            lv_obj_set_style_shadow_color(meteor, accent(2), 0);
+            lv_obj_set_style_shadow_width(meteor, 4, 0);
+            lv_obj_set_style_shadow_opa(meteor, LV_OPA_40, 0);
+        }
+
+        runner_ground_ = lv_obj_create(game_field_);
+        lv_obj_set_pos(runner_ground_, 2, 2 + static_cast<int>(mini_games::TapRunner::kGroundY));
+        lv_obj_set_size(runner_ground_, static_cast<int>(mini_games::kFieldWidth), 2);
+        lv_obj_set_style_radius(runner_ground_, 1, 0);
+        lv_obj_set_style_bg_color(runner_ground_, accent(3), 0);
+        lv_obj_set_style_border_width(runner_ground_, 0, 0);
+
+        runner_player_ = lv_obj_create(game_field_);
+        lv_obj_set_size(runner_player_, static_cast<int>(mini_games::TapRunner::kPlayerSize),
+                        static_cast<int>(mini_games::TapRunner::kPlayerSize));
+        lv_obj_set_style_radius(runner_player_, 3, 0);
+        lv_obj_set_style_bg_color(runner_player_, accent(3), 0);
+        lv_obj_set_style_border_width(runner_player_, 0, 0);
+        lv_obj_set_style_shadow_color(runner_player_, accent(3), 0);
+        lv_obj_set_style_shadow_width(runner_player_, 6, 0);
+        lv_obj_set_style_shadow_opa(runner_player_, LV_OPA_50, 0);
+
+        runner_obstacle_ = lv_obj_create(game_field_);
+        lv_obj_set_style_radius(runner_obstacle_, 3, 0);
+        lv_obj_set_style_bg_color(runner_obstacle_, accent(2), 0);
+        lv_obj_set_style_border_width(runner_obstacle_, 0, 0);
+
+        game_overlay_ = create_glass_panel(game_field_, 11, 52, 93, 58);
+        lv_obj_set_style_bg_color(game_overlay_, lv_color_hex(0x111827), 0);
+        lv_obj_set_style_bg_opa(game_overlay_, LV_OPA_90, 0);
+        game_overlay_label_ = create_label(game_overlay_, "READY",
+                                           &lv_font_montserrat_14,
+                                           lv_color_hex(0xF8FAFC));
+        lv_obj_set_width(game_overlay_label_, 93);
+        lv_obj_set_style_text_align(game_overlay_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(game_overlay_label_);
+
+        game_controls_label_ = create_label(game_screen_, "K1 BACK  K2 CENTER",
+                                            &lv_font_montserrat_12,
+                                            lv_color_hex(0x738096));
+        lv_obj_set_width(game_controls_label_, bsp::kDisplayWidth);
+        lv_obj_set_style_text_align(game_controls_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_pos(game_controls_label_, 0, 220);
+        configure_game_objects();
+    }
+
+    void advance_arcade()
+    {
+        arcade_selected_ = (arcade_selected_ + 1) % 3;
+        update_arcade_selector(false);
+    }
+
+    void update_arcade_selector(bool boot)
+    {
+        constexpr std::array<const char*, 3> symbols = {
+            LV_SYMBOL_GPS, LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY};
+        constexpr std::array<size_t, 3> color_indices = {4, 2, 3};
+        const auto game = static_cast<mini_games::GameId>(arcade_selected_);
+        const size_t color_index = color_indices[arcade_selected_];
+
+        lv_label_set_text(arcade_icon_, symbols[arcade_selected_]);
+        lv_label_set_text(arcade_name_label_, mini_games::name(game));
+        lv_label_set_text(arcade_description_label_, mini_games::subtitle(game));
+        lv_label_set_text_fmt(arcade_index_label_, "0%d / 03", arcade_selected_ + 1);
+        lv_obj_set_style_text_color(arcade_icon_, accent(color_index), 0);
+        lv_obj_set_style_border_color(arcade_panel_, accent(color_index), 0);
+        for (size_t index = 0; index < arcade_dots_.size(); ++index) {
+            const bool selected = index == static_cast<size_t>(arcade_selected_);
+            lv_obj_set_style_bg_color(arcade_dots_[index],
+                                      selected ? accent(color_index)
+                                               : lv_color_hex(0x46546A), 0);
+            lv_obj_set_style_bg_opa(arcade_dots_[index],
+                                    selected ? LV_OPA_COVER : LV_OPA_50, 0);
+        }
+        start_animation(arcade_panel_, anim_scale, boot ? 226 : 242, 256,
+                        boot ? 520 : 320, 0, lv_anim_path_overshoot);
+        start_animation(arcade_name_label_, anim_opa, LV_OPA_20, LV_OPA_COVER, 300);
+    }
+
+    size_t active_game_color() const
+    {
+        switch (active_game_) {
+        case mini_games::GameId::tilt_quest:
+            return 4;
+        case mini_games::GameId::meteor_dodge:
+            return 2;
+        case mini_games::GameId::tap_runner:
+            return 3;
+        }
+        return 4;
+    }
+
+    void configure_game_objects()
+    {
+        const bool show_tilt = active_game_ == mini_games::GameId::tilt_quest;
+        const bool show_meteors = active_game_ == mini_games::GameId::meteor_dodge;
+        const bool show_runner = active_game_ == mini_games::GameId::tap_runner;
+
+        set_visible(tilt_goal_, show_tilt);
+        set_visible(tilt_ball_, show_tilt);
+        for (lv_obj_t* wall : tilt_walls_) {
+            set_visible(wall, show_tilt);
+        }
+        set_visible(meteor_player_, show_meteors);
+        set_visible(meteor_shield_, false);
+        for (lv_obj_t* meteor : meteor_objects_) {
+            set_visible(meteor, show_meteors);
+        }
+        set_visible(runner_ground_, show_runner);
+        set_visible(runner_player_, show_runner);
+        set_visible(runner_obstacle_, show_runner);
+
+        const char* short_title = show_tilt ? "TILT" : show_meteors ? "METEOR" : "RUNNER";
+        lv_label_set_text(game_title_label_, short_title);
+        lv_obj_set_style_text_color(game_score_label_, accent(active_game_color()), 0);
+        lv_obj_set_style_border_color(game_field_, accent(active_game_color()), 0);
+        if (show_tilt) {
+            lv_label_set_text(game_controls_label_, "K1 BACK   K2 CENTER");
+        } else if (show_meteors) {
+            lv_label_set_text(game_controls_label_, "K1 BACK   K2 SHIELD");
+        } else {
+            lv_label_set_text(game_controls_label_, "K1 BACK    K2 JUMP");
+        }
+    }
+
+    void open_arcade_game()
+    {
+        active_game_ = static_cast<mini_games::GameId>(arcade_selected_);
+        current_page_ = Page::game;
+        configure_game_objects();
+        restart_current_game();
+        lv_screen_load_anim(game_screen_, LV_SCREEN_LOAD_ANIM_MOVE_LEFT,
+                            kTransitionMs, 0, false);
+    }
+
+    void show_arcade()
+    {
+        if (mini_games::requires_motion(active_game_)) {
+            request_motion_enabled(false);
+        }
+        game_waiting_for_motion_ = false;
+        game_started_ = false;
+        current_page_ = Page::arcade;
+        update_arcade_selector(false);
+        lv_screen_load_anim(arcade_screen_, LV_SCREEN_LOAD_ANIM_MOVE_RIGHT,
+                            kTransitionMs, 0, false);
+    }
+
+    void show_game_overlay(const char* text)
+    {
+        lv_label_set_text(game_overlay_label_, text);
+        set_visible(game_overlay_, true);
+        lv_obj_move_foreground(game_overlay_);
+        start_animation(game_overlay_, anim_opa, LV_OPA_40, LV_OPA_COVER, 260);
+    }
+
+    void hide_game_overlay()
+    {
+        set_visible(game_overlay_, false);
+    }
+
+    void calibrate_game_motion(const model::MotionSample& sample)
+    {
+        game_roll_zero_ = sample.roll_deg;
+        game_pitch_zero_ = sample.pitch_deg;
+    }
+
+    static float angle_delta(float angle, float zero)
+    {
+        float difference = angle - zero;
+        while (difference > 180.0f) {
+            difference -= 360.0f;
+        }
+        while (difference < -180.0f) {
+            difference += 360.0f;
+        }
+        return difference;
+    }
+
+    mini_games::RunState current_game_state() const
+    {
+        switch (active_game_) {
+        case mini_games::GameId::tilt_quest:
+            return tilt_quest_.state();
+        case mini_games::GameId::meteor_dodge:
+            return meteor_dodge_.state();
+        case mini_games::GameId::tap_runner:
+            return tap_runner_.state();
+        }
+        return mini_games::RunState::game_over;
+    }
+
+    void reset_game_engine()
+    {
+        game_motion_error_shown_ = false;
+        const uint32_t seed = esp_random();
+        switch (active_game_) {
+        case mini_games::GameId::tilt_quest:
+            tilt_quest_.reset(seed);
+            lv_label_set_text(game_status_label_, "TILT / K2 CENTER");
+            break;
+        case mini_games::GameId::meteor_dodge:
+            meteor_dodge_.reset(seed);
+            lv_label_set_text(game_status_label_, "SHIELD READY");
+            break;
+        case mini_games::GameId::tap_runner:
+            tap_runner_.reset(seed);
+            lv_label_set_text(game_status_label_, "TAP K2 TO JUMP");
+            break;
+        }
+        game_last_state_ = mini_games::RunState::playing;
+        game_started_ = true;
+        game_waiting_for_motion_ = false;
+        game_last_update_us_ = esp_timer_get_time();
+        hide_game_overlay();
+        update_game_objects();
+    }
+
+    void restart_current_game()
+    {
+        configure_game_objects();
+        game_started_ = false;
+        game_motion_error_shown_ = false;
+        game_last_update_us_ = esp_timer_get_time();
+        if (!mini_games::requires_motion(active_game_)) {
+            request_motion_enabled(false);
+            reset_game_engine();
+            return;
+        }
+
+        request_motion_enabled(true);
+        const model::MotionSample sample = model::MotionState::instance().snapshot();
+        if (motion_runtime_state() == MotionRuntimeState::running && sample.valid) {
+            calibrate_game_motion(sample);
+            reset_game_engine();
+            return;
+        }
+
+        game_waiting_for_motion_ = true;
+        lv_label_set_text(game_score_label_, "--");
+        lv_label_set_text(game_status_label_, "BMI270 / STARTING");
+        show_game_overlay("HOLD LEVEL\nSTARTING IMU");
+    }
+
     void advance_carousel()
     {
         selected_ = (selected_ + 1) % static_cast<int>(cards_.size());
@@ -686,11 +1191,12 @@ private:
 
     void update_carousel(bool boot)
     {
-        constexpr std::array<const char*, 4> descriptions = {
+        constexpr std::array<const char*, 5> descriptions = {
             "On-demand 100 Hz VQF",
             "Layered aura animation",
             "Memory and uptime",
             "G4 + G5 square wave",
+            "Three pocket games",
         };
         lv_obj_move_foreground(cards_[selected_]);
         for (size_t index = 0; index < cards_.size(); ++index) {
@@ -756,10 +1262,15 @@ private:
             target = system_screen_;
             update_system();
             break;
-        default:
+        case 3:
             current_page_ = Page::wave;
             target = wave_screen_;
             set_wave_output(true);
+            break;
+        default:
+            current_page_ = Page::arcade;
+            target = arcade_screen_;
+            update_arcade_selector(false);
             break;
         }
         lv_screen_load_anim(target, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, kTransitionMs, 0, false);
@@ -771,6 +1282,9 @@ private:
             request_motion_enabled(false);
         } else if (current_page_ == Page::wave) {
             set_wave_output(false);
+        } else if (current_page_ == Page::game &&
+                   mini_games::requires_motion(active_game_)) {
+            request_motion_enabled(false);
         }
         current_page_ = Page::menu;
         lv_screen_load_anim(menu_screen_, LV_SCREEN_LOAD_ANIM_MOVE_RIGHT, kTransitionMs, 0, false);
@@ -895,6 +1409,175 @@ private:
         start_animation(attitude_clip_, anim_border_opa, LV_OPA_20, LV_OPA_60, 500);
     }
 
+    void update_tilt_objects()
+    {
+        const mini_games::Point& ball = tilt_quest_.ball();
+        const mini_games::Point& goal = tilt_quest_.goal();
+        lv_obj_set_pos(tilt_ball_,
+                       2 + static_cast<int>(std::lround(
+                               ball.x - mini_games::TiltQuest::kBallRadius)),
+                       2 + static_cast<int>(std::lround(
+                               ball.y - mini_games::TiltQuest::kBallRadius)));
+        lv_obj_set_pos(tilt_goal_,
+                       2 + static_cast<int>(std::lround(
+                               goal.x - mini_games::TiltQuest::kGoalRadius)),
+                       2 + static_cast<int>(std::lround(
+                               goal.y - mini_games::TiltQuest::kGoalRadius)));
+        const uint32_t seconds = static_cast<uint32_t>(
+            std::ceil(tilt_quest_.seconds_remaining()));
+        lv_label_set_text_fmt(game_score_label_, "%lu / %lu",
+                              static_cast<unsigned long>(tilt_quest_.score()),
+                              static_cast<unsigned long>(mini_games::TiltQuest::kTargetScore));
+        lv_label_set_text_fmt(game_status_label_, "%lus  TILT / K2 CENTER",
+                              static_cast<unsigned long>(seconds));
+    }
+
+    void update_meteor_objects()
+    {
+        const int player_x = 2 + static_cast<int>(std::lround(
+            meteor_dodge_.player_x() - mini_games::MeteorDodge::kPlayerRadius));
+        const int player_y = 2 + static_cast<int>(
+            mini_games::MeteorDodge::kPlayerY - mini_games::MeteorDodge::kPlayerRadius);
+        lv_obj_set_pos(meteor_player_, player_x, player_y);
+        lv_obj_set_pos(meteor_shield_, player_x - 5, player_y - 5);
+        set_visible(meteor_shield_, meteor_dodge_.shield_active());
+
+        for (size_t index = 0; index < meteor_objects_.size(); ++index) {
+            const mini_games::MeteorDodge::Meteor& meteor =
+                meteor_dodge_.meteors()[index];
+            const int diameter = std::max(
+                7, static_cast<int>(std::lround(meteor.radius * 2.0f)));
+            lv_obj_set_size(meteor_objects_[index], diameter, diameter);
+            lv_obj_set_pos(
+                meteor_objects_[index],
+                2 + static_cast<int>(std::lround(meteor.center.x - meteor.radius)),
+                2 + static_cast<int>(std::lround(meteor.center.y - meteor.radius)));
+        }
+
+        lv_label_set_text_fmt(game_score_label_, "SCORE %lu",
+                              static_cast<unsigned long>(meteor_dodge_.score()));
+        if (meteor_dodge_.shield_active()) {
+            lv_label_set_text(game_status_label_, "SHIELD ACTIVE");
+        } else if (meteor_dodge_.shield_ready()) {
+            lv_label_set_text(game_status_label_, "SHIELD READY / K2");
+        } else {
+            const uint32_t tenths = static_cast<uint32_t>(
+                std::ceil(meteor_dodge_.shield_cooldown_seconds() * 10.0f));
+            lv_label_set_text_fmt(game_status_label_, "SHIELD %lu.%lus",
+                                  static_cast<unsigned long>(tenths / 10U),
+                                  static_cast<unsigned long>(tenths % 10U));
+        }
+    }
+
+    void update_runner_objects()
+    {
+        lv_obj_set_pos(runner_player_,
+                       2 + static_cast<int>(mini_games::TapRunner::kPlayerX),
+                       2 + static_cast<int>(std::lround(tap_runner_.player_y())));
+        const mini_games::Rect& obstacle = tap_runner_.obstacle();
+        lv_obj_set_pos(runner_obstacle_,
+                       2 + static_cast<int>(std::lround(obstacle.x)),
+                       2 + static_cast<int>(std::lround(obstacle.y)));
+        lv_obj_set_size(runner_obstacle_,
+                        std::max(1, static_cast<int>(std::lround(obstacle.width))),
+                        std::max(1, static_cast<int>(std::lround(obstacle.height))));
+        lv_label_set_text_fmt(game_score_label_, "SCORE %lu",
+                              static_cast<unsigned long>(tap_runner_.score()));
+        lv_label_set_text(game_status_label_,
+                          tap_runner_.on_ground() ? "TAP K2 TO JUMP" : "AIRBORNE");
+    }
+
+    void update_game_objects()
+    {
+        switch (active_game_) {
+        case mini_games::GameId::tilt_quest:
+            update_tilt_objects();
+            break;
+        case mini_games::GameId::meteor_dodge:
+            update_meteor_objects();
+            break;
+        case mini_games::GameId::tap_runner:
+            update_runner_objects();
+            break;
+        }
+        lv_obj_move_foreground(game_overlay_);
+    }
+
+    void update_game()
+    {
+        if (game_waiting_for_motion_) {
+            const MotionRuntimeState runtime = motion_runtime_state();
+            const model::MotionSample sample = model::MotionState::instance().snapshot();
+            if (runtime == MotionRuntimeState::running && sample.valid) {
+                calibrate_game_motion(sample);
+                reset_game_engine();
+            } else if (runtime == MotionRuntimeState::failed &&
+                       !game_motion_error_shown_) {
+                game_motion_error_shown_ = true;
+                lv_label_set_text(game_status_label_, "BMI270 / ERROR");
+                show_game_overlay("IMU ERROR\nHOLD K2 RETRY");
+            }
+            return;
+        }
+        if (!game_started_) {
+            return;
+        }
+
+        const int64_t now = esp_timer_get_time();
+        const float elapsed_seconds = game_last_update_us_ == 0
+                                          ? 0.0f
+                                          : static_cast<float>(now - game_last_update_us_) /
+                                                1000000.0f;
+        game_last_update_us_ = now;
+
+        if (active_game_ == mini_games::GameId::tilt_quest ||
+            active_game_ == mini_games::GameId::meteor_dodge) {
+            const model::MotionSample sample = model::MotionState::instance().snapshot();
+            if (!sample.valid) {
+                return;
+            }
+            // The fused Euler signs run opposite to the physical screen direction.
+            // Keep the roll/pitch axis assignment, but invert both control signs.
+            const float tilt_x = std::clamp(
+                -angle_delta(sample.roll_deg, game_roll_zero_) / 20.0f, -1.0f, 1.0f);
+            if (active_game_ == mini_games::GameId::tilt_quest) {
+                const float tilt_y = std::clamp(
+                    angle_delta(sample.pitch_deg, game_pitch_zero_) / 20.0f,
+                    -1.0f, 1.0f);
+                tilt_quest_.update(elapsed_seconds, tilt_x, tilt_y);
+            } else {
+                meteor_dodge_.update(elapsed_seconds, tilt_x);
+            }
+        } else {
+            tap_runner_.update(elapsed_seconds);
+        }
+
+        update_game_objects();
+        const mini_games::RunState state = current_game_state();
+        if (state == game_last_state_) {
+            if (state == mini_games::RunState::won) {
+                lv_label_set_text(game_status_label_, "QUEST COMPLETE / K2 REPLAY");
+            } else if (state == mini_games::RunState::game_over) {
+                lv_label_set_text(game_status_label_, "K2 REPLAY / HOLD RESET");
+            }
+            return;
+        }
+        game_last_state_ = state;
+        if (state == mini_games::RunState::won) {
+            lv_label_set_text(game_status_label_, "QUEST COMPLETE");
+            show_game_overlay("CLEARED!\nK2 REPLAY");
+        } else if (state == mini_games::RunState::game_over) {
+            lv_label_set_text(game_status_label_, "HOLD K2 TO RESET");
+            if (active_game_ == mini_games::GameId::tilt_quest) {
+                show_game_overlay("TIME UP\nK2 REPLAY");
+            } else if (active_game_ == mini_games::GameId::meteor_dodge) {
+                show_game_overlay("CRASHED\nK2 REPLAY");
+            } else {
+                show_game_overlay("TRIPPED\nK2 REPLAY");
+            }
+        }
+    }
+
     static float approach_angle(float current, float target, float gain)
     {
         float difference = target - current;
@@ -1017,13 +1700,15 @@ private:
         lv_label_set_text_fmt(uptime_label_, "UP    %llu s", uptime_seconds);
     }
 
-    std::array<lv_obj_t*, 5> screens_{};
+    std::array<lv_obj_t*, 7> screens_{};
     lv_obj_t* menu_screen_ = nullptr;
     lv_obj_t* motion_screen_ = nullptr;
     lv_obj_t* ambient_screen_ = nullptr;
     lv_obj_t* system_screen_ = nullptr;
     lv_obj_t* wave_screen_ = nullptr;
-    std::array<lv_obj_t*, 4> cards_{};
+    lv_obj_t* arcade_screen_ = nullptr;
+    lv_obj_t* game_screen_ = nullptr;
+    std::array<lv_obj_t*, 5> cards_{};
     lv_obj_t* selector_glow_ = nullptr;
     lv_obj_t* menu_hint_ = nullptr;
 
@@ -1055,8 +1740,49 @@ private:
     lv_obj_t* psram_label_ = nullptr;
     lv_obj_t* uptime_label_ = nullptr;
 
+    lv_obj_t* arcade_panel_ = nullptr;
+    lv_obj_t* arcade_index_label_ = nullptr;
+    lv_obj_t* arcade_icon_ = nullptr;
+    lv_obj_t* arcade_name_label_ = nullptr;
+    lv_obj_t* arcade_description_label_ = nullptr;
+    std::array<lv_obj_t*, 3> arcade_dots_{};
+    int arcade_selected_ = 0;
+
+    lv_obj_t* game_title_label_ = nullptr;
+    lv_obj_t* game_score_label_ = nullptr;
+    lv_obj_t* game_status_label_ = nullptr;
+    lv_obj_t* game_controls_label_ = nullptr;
+    lv_obj_t* game_field_ = nullptr;
+    lv_obj_t* game_overlay_ = nullptr;
+    lv_obj_t* game_overlay_label_ = nullptr;
+    lv_obj_t* tilt_ball_ = nullptr;
+    lv_obj_t* tilt_goal_ = nullptr;
+    std::array<lv_obj_t*, mini_games::TiltQuest::kWallCount> tilt_walls_{};
+    lv_obj_t* meteor_player_ = nullptr;
+    lv_obj_t* meteor_shield_ = nullptr;
+    std::array<lv_obj_t*, mini_games::MeteorDodge::kMeteorCount> meteor_objects_{};
+    lv_obj_t* runner_ground_ = nullptr;
+    lv_obj_t* runner_player_ = nullptr;
+    lv_obj_t* runner_obstacle_ = nullptr;
+
+    mini_games::TiltQuest tilt_quest_{};
+    mini_games::MeteorDodge meteor_dodge_{};
+    mini_games::TapRunner tap_runner_{};
+    mini_games::GameId active_game_ = mini_games::GameId::tilt_quest;
+    mini_games::RunState game_last_state_ = mini_games::RunState::playing;
+    int64_t game_last_update_us_ = 0;
+    float game_roll_zero_ = 0.0f;
+    float game_pitch_zero_ = 0.0f;
+    bool game_waiting_for_motion_ = false;
+    bool game_motion_error_shown_ = false;
+    bool game_started_ = false;
+
     lv_timer_t* update_timer_ = nullptr;
     lv_timer_t* carousel_timer_ = nullptr;
+#ifdef M5_STICKS3_HW_SMOKE_TEST
+    lv_timer_t* smoke_timer_ = nullptr;
+    uint8_t smoke_step_ = 0;
+#endif
     Page current_page_ = Page::menu;
     int selected_ = 0;
     bool carousel_busy_ = false;
@@ -1094,6 +1820,12 @@ private:
             event.action == app::ButtonAction::pressed) {
             self->key2_pressed_at_ = event.timestamp;
             self->key2_pressed_ = true;
+            if (!lvgl_port_lock(100)) {
+                ESP_LOGW(kTag, "LVGL lock timeout while handling KEY2 press");
+                return;
+            }
+            self->controller_->key2_pressed();
+            lvgl_port_unlock();
             return;
         }
         if (event.action != app::ButtonAction::released) {
@@ -1104,7 +1836,7 @@ private:
         if (event.id == app::ButtonId::key2) {
             key2_long_press =
                 self->key2_pressed_ &&
-                event.timestamp - self->key2_pressed_at_ >= kDutyHoldTicks;
+                event.timestamp - self->key2_pressed_at_ >= kLongPressTicks;
             self->key2_pressed_ = false;
         }
         if (!lvgl_port_lock(100)) {

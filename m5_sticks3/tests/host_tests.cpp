@@ -10,6 +10,7 @@
 #include "app_manager.hpp"
 #include "button_debouncer.hpp"
 #include "button_event_bus.hpp"
+#include "mini_games.hpp"
 
 namespace {
 
@@ -301,6 +302,81 @@ void test_event_bus_capacity_and_overflow()
     }
 }
 
+void test_game_metadata()
+{
+    assert(std::string_view(mini_games::name(mini_games::GameId::tilt_quest)) ==
+           "TILT QUEST");
+    assert(mini_games::requires_motion(mini_games::GameId::tilt_quest));
+    assert(mini_games::requires_motion(mini_games::GameId::meteor_dodge));
+    assert(!mini_games::requires_motion(mini_games::GameId::tap_runner));
+}
+
+void test_tilt_quest_physics_and_timeout()
+{
+    mini_games::TiltQuest game;
+    game.reset(7);
+    assert(game.state() == mini_games::RunState::playing);
+    assert(game.score() == 0);
+    assert(game.walls().size() == mini_games::TiltQuest::kWallCount);
+
+    game.update(10.0f, 0.0f, 0.0f);
+    assert(game.seconds_remaining() > 44.9f);
+    for (size_t step = 0; step < 400; ++step) {
+        game.update(0.02f, -1.0f, 1.0f);
+        assert(game.ball().x >= mini_games::TiltQuest::kBallRadius);
+        assert(game.ball().x <=
+               mini_games::kFieldWidth - mini_games::TiltQuest::kBallRadius);
+        assert(game.ball().y >= mini_games::TiltQuest::kBallRadius);
+        assert(game.ball().y <=
+               mini_games::kFieldHeight - mini_games::TiltQuest::kBallRadius);
+    }
+    for (size_t step = 0;
+         step < 2400 && game.state() == mini_games::RunState::playing; ++step) {
+        game.update(0.02f, 0.0f, 0.0f);
+    }
+    assert(game.state() == mini_games::RunState::game_over);
+    assert(game.seconds_remaining() == 0.0f);
+}
+
+void test_meteor_shield_and_steering_bounds()
+{
+    mini_games::MeteorDodge game;
+    game.reset(42);
+    assert(game.state() == mini_games::RunState::playing);
+    assert(game.shield_ready());
+    assert(game.activate_shield());
+    assert(!game.activate_shield());
+    for (size_t step = 0; step < 16; ++step) {
+        game.update(0.05f, 1.0f);
+        assert(game.player_x() >= mini_games::MeteorDodge::kPlayerRadius);
+        assert(game.player_x() <=
+               mini_games::kFieldWidth - mini_games::MeteorDodge::kPlayerRadius);
+    }
+    assert(!game.shield_active());
+    assert(!game.shield_ready());
+}
+
+void test_tap_runner_jump_cycle()
+{
+    mini_games::TapRunner game;
+    game.reset(99);
+    const float ground_y =
+        mini_games::TapRunner::kGroundY - mini_games::TapRunner::kPlayerSize;
+    assert(game.on_ground());
+    assert(game.player_y() == ground_y);
+    assert(game.jump());
+    assert(!game.jump());
+    game.update(0.05f);
+    assert(game.player_y() < ground_y);
+    for (size_t step = 0; step < 24; ++step) {
+        game.update(0.05f);
+    }
+    assert(game.state() == mini_games::RunState::playing);
+    assert(game.on_ground());
+    assert(game.player_y() == ground_y);
+    assert(game.jump());
+}
+
 } // namespace
 
 int main()
@@ -314,6 +390,10 @@ int main()
     test_button_debounce_and_tick_wrap();
     test_event_bus_subscription_and_fifo();
     test_event_bus_capacity_and_overflow();
+    test_game_metadata();
+    test_tilt_quest_physics_and_timeout();
+    test_meteor_shield_and_steering_bounds();
+    test_tap_runner_jump_cycle();
     std::cout << "All host tests passed\n";
     return 0;
 }
