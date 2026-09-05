@@ -11,6 +11,7 @@
 #include "app_module.hpp"
 #include "bsp_display.hpp"
 #include "button_event_bus.hpp"
+#include "connectivity_runtime.hpp"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -685,12 +686,14 @@ private:
         lv_obj_set_pos(badge, 8, 30);
 
         lv_obj_t* identity = create_glass_panel(system_screen_, 8, 53, 119, 67);
-        lv_obj_t* chip = create_label(identity, "ESP32-S3", &lv_font_montserrat_18,
+        lv_obj_t* chip = create_label(identity, "WIRELESS", &lv_font_montserrat_14,
                                       lv_color_hex(0xF8FAFC));
         lv_obj_set_pos(chip, 7, 7);
-        lv_obj_t* spec = create_label(identity, "240 MHz dual core\n8 MB flash / OPI RAM",
+        network_label_ = create_label(identity, "WiFi starting\nBLE starting",
                                       &lv_font_montserrat_12, lv_color_hex(0x92A4BD));
-        lv_obj_set_pos(spec, 7, 34);
+        lv_obj_set_pos(network_label_, 7, 29);
+        lv_obj_set_width(network_label_, 106);
+        lv_label_set_long_mode(network_label_, LV_LABEL_LONG_CLIP);
 
         lv_obj_t* telemetry = create_glass_panel(system_screen_, 8, 128, 119, 79);
         heap_label_ = create_label(telemetry, "HEAP  -- KB", &lv_font_montserrat_14,
@@ -1692,6 +1695,13 @@ private:
 
     void update_system()
     {
+        const auto network = connectivity::snapshot();
+        const char* ip = network.wifi.state == connectivity::WifiState::connected
+                             ? network.wifi.address : network.wifi.ap_address;
+        lv_label_set_text_fmt(network_label_, "%s\nBLE %s",
+                              ip[0] ? ip : connectivity::wifi_state_name(network.wifi.state),
+                              network.ble.connected ? "linked" :
+                              network.ble.advertising ? "ready" : "off");
         const uint32_t heap_kb = esp_get_free_heap_size() / 1024;
         const uint32_t psram_kb = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024;
         const uint64_t uptime_seconds = esp_timer_get_time() / 1000000ULL;
@@ -1736,6 +1746,7 @@ private:
     std::array<lv_obj_t*, 6> ambient_particles_{};
     size_t ambient_palette_ = 1;
 
+    lv_obj_t* network_label_ = nullptr;
     lv_obj_t* heap_label_ = nullptr;
     lv_obj_t* psram_label_ = nullptr;
     lv_obj_t* uptime_label_ = nullptr;

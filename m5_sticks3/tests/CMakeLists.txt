@@ -17,5 +17,13 @@ target_include_directories(app_host_tests PRIVATE
     ../components/mini_games/include
 )
 
+add_executable(connectivity_host_tests connectivity_tests.cpp)
+target_compile_features(connectivity_host_tests PRIVATE cxx_std_20)
+target_compile_options(connectivity_host_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(connectivity_host_tests PRIVATE
+    ../components/connectivity/include
+)
+
 enable_testing()
 add_test(NAME app_host_tests COMMAND app_host_tests)
+add_test(NAME connectivity_host_tests COMMAND connectivity_host_tests)

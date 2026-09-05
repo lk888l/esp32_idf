@@ -1,0 +1,9 @@
+menu "M5-StickS3 connectivity"
+    config M5_CONNECTIVITY_WIFI_ENABLED
+        bool "Enable Wi-Fi AP/STA and local HTTP API"
+        default y
+    config M5_CONNECTIVITY_BLE_ENABLED
+        bool "Enable NimBLE GATT transport"
+        depends on BT_NIMBLE_ENABLED
+        default y
+endmenu

@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "src/board_module.cpp"
+        "src/connectivity_module.cpp"
         "src/button_module.cpp"
         "src/motion_module.cpp"
         "src/ui_module.cpp"
@@ -19,6 +20,7 @@ idf_component_register(
         heap
         mini_games
         wave_generator
+        connectivity
 )
 
 if(M5_STICKS3_HW_SMOKE_TEST)

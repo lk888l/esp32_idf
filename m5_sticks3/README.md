@@ -15,11 +15,13 @@
 - LVGL 卡片式菜单，包含缓动、缩放、透明度、呼吸光和分层页面转场
 - `MOTION` 页面：BMI270 原始加速度、VQF 四元数派生的 Roll/Pitch/Yaw、动态姿态仪
 - `AURA` 页面：低速多层环形/粒子动画，用于展示偏重质量的动画风格
-- `SYSTEM` 页面：堆内存、PSRAM 和运行时间
+- `SYSTEM` 页面：Wi-Fi IP、BLE 状态、堆内存、PSRAM 和运行时间
 - `ARCADE` 页面：三款针对 135×240 小屏和双按键设计的小游戏
 - `TILT QUEST`：倾斜设备控制小球绕过障碍，45 秒内收集 5 个信标
 - `METEOR DODGE`：倾斜左右闪避陨石，KEY2 启动带冷却时间的护盾
 - `TAP RUNNER`：不依赖 IMU，按 KEY2 跳过随机高度的障碍
+- 受保护 Wi-Fi 热点、STA 配网与重试，提供统一 HTTP JSON API
+- BLE 加密 GATT、持久配对、长响应读取和通知，与 HTTP 共用查询、回显、遥测和配网协议
 - KEY1（GPIO11）：下一项 / 返回；KEY2（GPIO12）：打开 / 页面动作
 - MOTION 页面按 KEY2 可把当前航向设为相对零点
 
@@ -117,3 +119,9 @@ idf.py -B build/hw-smoke -p /dev/ttyACM0 flash monitor
 ```
 
 验证完成后重新烧录 `build/codex-idf` 中的正式固件。
+
+## Wi-Fi / BLE 通信框架
+
+新增 Wi-Fi STA + 独立密码备用热点、NimBLE GATT 加密收发、公共 API v1、NVS 配置与有界异步命令队列。SYSTEM 页面可查看 IP 和 BLE 状态。
+
+完整架构、配网步骤、接口协议、客户端用法与验证方式见 [通信框架文档](docs/connectivity.md)。

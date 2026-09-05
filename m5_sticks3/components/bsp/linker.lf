@@ -1,0 +1,14 @@
+# Keep LVGL's bounded 96 KiB TLSF arena while reserving internal RAM for
+# LCD DMA, task stacks and the Wi-Fi/BLE controller. No managed code is edited.
+# SPI completion touches LVGL objects: keep the BSP SPI interrupt non-IRAM
+# (intr_flags=0), so callbacks are masked while flash/NVS disables the cache.
+[scheme:m5_ui_psram]
+entries:
+    bss -> extern_ram
+    common -> extern_ram
+
+[mapping:m5_lvgl_pool]
+archive: liblvgl__lvgl.a
+entries:
+    if SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        lv_mem_core_builtin (m5_ui_psram)

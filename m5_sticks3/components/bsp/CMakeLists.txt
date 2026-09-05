@@ -1,4 +1,5 @@
 idf_component_register(
+    LDFRAGMENTS "linker.lf"
     SRCS
         "src/bsp_board.cpp"
         "src/bsp_display.cpp"
