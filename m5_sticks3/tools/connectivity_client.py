@@ -5,7 +5,7 @@ BLE additionally needs bleak and an encrypted paired connection:
     python -m pip install bleak
     python connectivity_client.py --ble AA:BB:CC:DD:EE:FF status
 
-Set M5_API_TOKEN for WiFi changes. Set M5_WIFI_PASSWORD or enter it at the
+Set M5_API_TOKEN for radio changes and scanning. Set M5_WIFI_PASSWORD or enter it at the
 hidden prompt. Neither secret is written to a file or printed by this tool.
 """
 
@@ -130,7 +130,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--timeout", type=positive_timeout, default=30.0, help="transport timeout in seconds (default: 30)")
     result.add_argument("--token", default=os.environ.get("M5_API_TOKEN"), help="API token; prefer the M5_API_TOKEN environment variable")
     commands = result.add_subparsers(dest="command", required=True)
-    for name in ("status", "ping", "telemetry"):
+    for name in ("status", "ping", "telemetry", "traffic"):
         commands.add_parser(name)
     echo = commands.add_parser("echo", help="round-trip up to 128 UTF-8 bytes")
     echo.add_argument("data")
@@ -138,6 +138,17 @@ def parser() -> argparse.ArgumentParser:
     wifi.add_argument("ssid")
     wifi.add_argument("--open", action="store_true", help="explicitly connect to an open STA network")
     commands.add_parser("wifi-clear", help="erase saved STA credentials; device AP remains available")
+    for radio in ("wifi", "ble"):
+        for action in ("scan", "enable", "disable", "disconnect"):
+            commands.add_parser(f"{radio}-{action}", help=f"queue {radio} {action}; requires API token")
+        results = commands.add_parser(f"{radio}-results", help="read one stable scan result page")
+        results.add_argument("--index", type=int, default=0)
+    commands.add_parser("wifi-reconnect", help="resume saved STA configuration")
+    peer = commands.add_parser("ble-peer", help="central connection status and primary service UUID")
+    peer.add_argument("--index", type=int, default=0)
+    connect = commands.add_parser("ble-connect", help="connect a scanned, connectable BLE peripheral")
+    connect.add_argument("address")
+    connect.add_argument("--address-type", type=int, choices=range(4), required=True)
     return result
 
 
@@ -151,7 +162,10 @@ def main(argv: list[str] | None = None) -> int:
             if len(args.data.encode("utf-8")) > 128 or "\0" in args.data:
                 raise ValueError("echo data must be at most 128 UTF-8 bytes without NUL")
             fields["data"] = args.data
-        if operation in ("wifi-set", "wifi-clear"):
+        mutation = operation in ("wifi-set", "wifi-clear", "wifi-reconnect", "ble-connect") or (
+            operation.startswith(("wifi-", "ble-")) and
+            operation.rsplit("-", 1)[-1] in ("scan", "enable", "disable", "disconnect"))
+        if mutation:
             if (not args.token or len(args.token) != 32 or
                     any(char not in "0123456789abcdef" for char in args.token)):
                 raise ValueError("set M5_API_TOKEN (or --token) to the 32 digit API token from USB setup")
@@ -168,8 +182,23 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("password must be empty, 8..63 UTF-8 bytes, or 64 hex digits")
                 fields.update(ssid=args.ssid, password=password)
                 operation = "wifi.configure"
-            else:
+            elif operation == "wifi-clear":
                 operation = "wifi.clear"
+            elif operation == "ble-connect":
+                if (len(args.address) != 17 or any(
+                        c != ":" if i % 3 == 2 else c not in string.hexdigits
+                        for i, c in enumerate(args.address))):
+                    raise ValueError("BLE address must use AA:BB:CC:DD:EE:FF format")
+                fields.update(address=args.address, address_type=args.address_type)
+                operation = "ble.connect"
+            else:
+                operation = operation.replace("-", ".")
+        elif operation in ("wifi-results", "ble-results", "ble-peer"):
+            if not 0 <= args.index <= 255:
+                raise ValueError("index must be between 0 and 255")
+            fields["index"] = args.index
+            operation = {"wifi-results": "wifi.scan.results", "ble-results": "ble.scan.results",
+                         "ble-peer": "ble.peer"}[operation]
         payload = encode_request(operation, **fields)
         if args.ble:
             response = asyncio.run(ble_exchange(args.ble, payload, args.timeout))

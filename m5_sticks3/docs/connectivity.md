@@ -1,9 +1,11 @@
 # Wi-Fi / BLE 快速使用
 
 工程仍沿用原有 AppModule / AppManager / AppTask。新增的 connectivity 组件负责通信协议，
-app_modules 中的 ConnectivityModule 只接入生命周期，UI 只读取状态快照。
+app_modules 中的 ConnectivityModule 只接入生命周期；UI 读取状态快照，实体按键操作
+通过同一个有界队列提交。设备菜单操作见 [Wi-Fi / BLE 图形界面说明](radio-ui.md)。
 
 1. 在串口启动日志中找到 `local setup` 两行，取得设备独立的热点密码和 API 令牌。
+   热点密码也可在 WIFI → Local hotspot 的实体屏幕中查看；API 令牌仍从串口读取。
 2. 连接 `M5StickS3-xxxxxx` 热点，默认地址为 `192.168.4.1`。当前这台设备名称为
    `M5StickS3-D536F4`；SYSTEM 页面也会显示 IP 与 BLE 状态。
 3. 在工程目录运行 `python tools/connectivity_client.py status`；`ping`、
@@ -21,7 +23,9 @@ app_modules 中的 ConnectivityModule 只接入生命周期，UI 只读取状态
 
 详细的架构、接口边界和构建说明如下。
 
-## 本次验收记录（2026-09-05）
+## 历史验收记录（2026-09-05）
+
+以下记录对应 9 月 5 日的通信框架版本，不代表后来新增的图形扫描与主动外连功能已全部通过验证。
 
 下表区分已经通过的检查与仍待完成的实机验证。配网命令写入成功不代表 STA
 已连接路由器；只有连接状态与 DHCP 地址同时确认，才能判定 STA 连网成功。
@@ -53,7 +57,12 @@ callbacks can read immutable snapshots or enqueue commands into a statically
 allocated four-entry queue. Only the application task applies and persists
 station configuration. NimBLE manages its own peer-bond NVS storage from the
 Bluetooth stack context. One command is processed per application tick. The
-UI reads a short critical-section-protected POD snapshot, following `MotionState`.
+UI reads short critical-section-protected POD snapshots, following `MotionState`.
+Physical radio controls enqueue typed value requests into the same queue. A lazy
+`RadioUi` screen reuses a bounded widget set, freezes displayed scan results and
+copies a selected target before connecting. Live diagnostic snapshots are held
+in reusable controller storage; snapshot fetching and LVGL rendering unwind
+separately to remain within the existing task stack.
 
 Connection retry policy and credential validation are pure C++ and covered by
 host tests. There are no direct LVGL, GPIO, waveform or IMU mutations from
@@ -68,8 +77,10 @@ With no saved station credentials, Wi-Fi starts a protected access point:
 - Access point address: `192.168.4.1`
 - Password: independently generated 16 hexadecimal characters
 - API token: independently generated 32 hexadecimal characters
-- Both secrets persist in the `stick_net` NVS namespace and appear only on the
-  physical USB console as `local setup` lines. They are never returned by the API.
+- Both secrets persist in the `stick_net` NVS namespace and appear on the
+  physical USB console as `local setup` lines. The AP password is additionally
+  available on the physical WIFI > Local hotspot screen. The API token remains
+  console-only. Neither secret is returned by a radio API.
 
 Read the USB console, connect a computer/phone to that AP, then configure the
 station. The AP remains available while the station connects or retries.
@@ -85,6 +96,10 @@ Never erase all flash just to change station credentials.
 
 The SYSTEM page shows the station IP when connected, otherwise the AP IP,
 and BLE readiness/connection status. Heap, PSRAM and uptime remain visible.
+The WIFI and BLE menu cards expose scans, link diagnostics, traffic/echo and
+runtime connection controls. Radio enable/disable and explicit disconnect are
+runtime choices; they do not overwrite boot settings or erase saved credentials
+and bonds. A submitted Wi-Fi configuration is persisted in NVS.
 
 ## API v1
 
@@ -102,12 +117,29 @@ Duplicate keys, trailing JSON, embedded NULs and excessive nesting are rejected.
 | `telemetry` | none | Latest motion validity, count and Euler angles |
 | `wifi.configure` | `token`, `ssid`, `password` | Persist and apply station settings asynchronously |
 | `wifi.clear` | `token` | Clear saved station settings asynchronously |
+| `wifi.scan` / `ble.scan` | `token` | Start a bounded asynchronous scan |
+| `wifi.scan.results` / `ble.scan.results` | optional `index` | Read scan metadata and one cached result |
+| `wifi.reconnect` / `wifi.disconnect` | `token` | Reapply saved station settings / disconnect without erasing them |
+| `wifi.enable` / `wifi.disable` | `token` | Enable / disable Wi-Fi for this runtime |
+| `ble.connect` | `token`, `address`, `address_type` | Connect one outbound BLE peer and discover primary services |
+| `ble.disconnect` | `token` | Disconnect the outbound peer, preserving the NUS client |
+| `ble.enable` / `ble.disable` | `token` | Enable / disable BLE for this runtime |
+| `ble.peer` | optional `index` | Read outbound peer state and one cached service UUID |
+| `traffic` | none | Application JSON request/response counts, bytes and recent echo |
 
 For mutations, `{"result":"accepted"}` means queued, not connected or durable.
 Poll `status`: `completed` is a monotonically increasing completion counter;
 `last_id` and `last_error` describe the most recently processed command.
-`last_error: 0` means settings were persisted/applied to the driver; check
-`wifi: "connected"` and `ip` for actual DHCP success. Multiple writers must
+`last_error: 0` means the command was applied or its asynchronous operation was
+started. It does not mean a scan or connection has finished. For provisioning,
+check `wifi: "connected"` and `ip` for actual DHCP success. Scan metadata exposes
+`scanning`, `generation`, `count`, `total` and `error`; use zero-based `index`
+to retrieve one row at a time and restart pagination if generation changes.
+At most 16 Wi-Fi/BLE scan results and 8 primary-service UUIDs are cached.
+Pass address and address_type from the selected scan result unchanged to `ble.connect`.
+`traffic` counts JSON at the common request handler, excluding HTTP headers,
+radio packets, transport overhead and retransmissions. Its displayed echo is
+limited to 64 bytes; primary-service discovery is separate from NUS JSON traffic. Multiple writers must
 coordinate because only the latest completion is retained. Queue saturation
 returns `busy`; callers should retry with bounded backoff.
 
@@ -132,8 +164,8 @@ Example:
 
 ### BLE transport
 
-ESP32-S3 supports BLE; this framework uses IDF's NimBLE peripheral stack and
-the Nordic UART Service UUID convention:
+ESP32-S3 supports BLE. The framework enables NimBLE peripheral, central and
+observer roles. The peripheral role exposes the Nordic UART Service UUID convention:
 
 | Attribute | UUID | Properties |
 | --- | --- | --- |
@@ -151,9 +183,14 @@ latest complete response, up to 512 bytes. Subscribing to TX gives a compact
 `{"ready":N}` notification, where N is the response length; it does not contain
 the full response. If a notification is lost, reading TX still retrieves it.
 Finish reading before sending another request. Disconnect clears the response
-and restarts advertising. Only one BLE peer is supported.
+and restarts peripheral advertising. There is one inbound NUS client slot and
+one outbound central slot, for at most two concurrent links. The central role
+scans advertisers, connects an explicitly selected connectable peer and caches
+its primary-service UUIDs. It does not write arbitrary characteristics or
+implement the complete application protocol of the peer. Scanning does not
+discover classic Bluetooth devices, and this is not SPP, audio or general file transfer.
 
-The link uses Secure Connections with Just Works encryption and persists peer
+The NUS link uses Secure Connections with Just Works encryption and persists peer
 bonds in NVS for encrypted reconnects. Legacy pairing and debug keys are disabled.
 Only the current peer can replace its stale bond; a full bond store returns an
 error rather than silently removing another peer. The API token still authorizes writes. This protects against passive
@@ -199,8 +236,9 @@ Use `--name` or `--ble` to select a different device.
 ## Build and hardware access
 
 Keep the repository's ESP-IDF **5.5.4** container rather than upgrading the SDK
-during a connectivity feature change. `sdkconfig.defaults` enables NimBLE,
-one BLE connection, Wi-Fi/BLE coexistence and an 8192-byte NimBLE host stack.
+during a connectivity feature change. `sdkconfig.defaults` enables NimBLE
+peripheral/central/observer roles, two BLE connections (one NUS client plus one
+outbound peer), Wi-Fi/BLE coexistence and an 8192-byte NimBLE host stack.
 NimBLE and suitable Wi-Fi/LwIP allocations use PSRAM, and 64 KiB of internal
 RAM is reserved for internal/DMA allocations. BSP linker rules move LVGL's
 existing fixed 96 KiB TLSF arena into PSRAM without changing its allocator or

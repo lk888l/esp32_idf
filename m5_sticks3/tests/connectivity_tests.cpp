@@ -73,6 +73,34 @@ void test_hex_psk()
     check(!connectivity::valid_credentials(key), "non-ASCII hex digit rejected");
 }
 
+void test_utf8_boundaries()
+{
+    using connectivity::valid_utf8;
+    check(valid_utf8("ASCII"), "ASCII valid");
+    check(valid_utf8("\xE4\xB8\xAD\xF0\x9F\x98\x80"), "multibyte UTF8 valid");
+    check(!valid_utf8("\xC0\xAF"), "overlong UTF8 rejected");
+    check(!valid_utf8("\xED\xA0\x80"), "surrogate rejected");
+    check(!valid_utf8("\xF4\x90\x80\x80"), "codepoint overflow rejected");
+    check(!valid_utf8("\xE4\xB8"), "truncated UTF8 rejected");
+    char output[4]{};
+    connectivity::copy_display_utf8("\xE4\xB8\xAD!", output, sizeof(output));
+    check(std::string_view(output) == "\xE4\xB8\xAD", "display truncates at character boundary");
+    connectivity::copy_display_utf8("\xFF!", output, sizeof(output));
+    check(std::string_view(output) == "?!", "invalid display byte replaced");
+}
+
+void test_ble_address_validation()
+{
+    using connectivity::valid_ble_address;
+    check(valid_ble_address("01:23:45:67:89:AB"), "public or random address shape");
+    check(valid_ble_address("aa:bb:cc:dd:ee:ff"), "lowercase address accepted");
+    check(!valid_ble_address(""), "empty address rejected");
+    check(!valid_ble_address("01:23:45:67:89"), "short address rejected");
+    check(!valid_ble_address("01-23-45-67-89-AB"), "wrong separator rejected");
+    check(!valid_ble_address("01:23:45:67:89:AZ"), "nonhex address rejected");
+    check(!valid_ble_address("01:23:45:67:89:AB "), "trailing data rejected");
+}
+
 void test_reconnect_backoff()
 {
     connectivity::RetryBackoff backoff;
@@ -121,6 +149,8 @@ int main()
 {
     test_credential_boundaries();
     test_hex_psk();
+    test_utf8_boundaries();
+    test_ble_address_validation();
     test_reconnect_backoff();
     test_token_comparison();
     std::cout << "All connectivity policy tests passed\n";

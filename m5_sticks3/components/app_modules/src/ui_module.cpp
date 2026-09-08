@@ -21,6 +21,7 @@
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
 #include "mini_games.hpp"
+#include "radio_ui.hpp"
 #include "motion_runtime.hpp"
 #include "motion_state.hpp"
 #include "wave_generator.hpp"
@@ -55,6 +56,7 @@ enum class Page : uint8_t {
     wave,
     arcade,
     game,
+    radio,
 };
 
 using AnimExec = void (*)(void*, int32_t);
@@ -225,11 +227,22 @@ public:
 #ifdef M5_STICKS3_HW_SMOKE_TEST
         start_hardware_smoke_test();
 #endif
+#ifdef M5_STICKS3_RADIO_SMOKE_TEST
+        start_radio_smoke_test();
+#endif
         return true;
     }
 
     void destroy()
     {
+#ifdef M5_STICKS3_RADIO_SMOKE_TEST
+        if (radio_smoke_timer_) {
+            lv_timer_delete(radio_smoke_timer_);
+            radio_smoke_timer_ = nullptr;
+        }
+#endif
+        if (current_page_ == Page::radio && menu_screen_) lv_screen_load(menu_screen_);
+        radio_ui_.close();
         request_motion_enabled(false);
         auto& generator = wave::Generator::instance();
         if (generator.initialized() && generator.enabled()) {
@@ -270,6 +283,10 @@ public:
 
     void key1()
     {
+        if (current_page_ == Page::radio) {
+            radio_ui_.next();
+            return;
+        }
         if (current_page_ == Page::menu) {
             if (carousel_busy_) {
                 carousel_step_queued_ = true;
@@ -287,6 +304,10 @@ public:
 
     void key2_pressed()
     {
+        if (current_page_ == Page::radio) {
+            radio_ui_.press();
+            return;
+        }
         if (current_page_ != Page::game || game_waiting_for_motion_) {
             return;
         }
@@ -304,6 +325,9 @@ public:
     void key2(bool long_press)
     {
         switch (current_page_) {
+        case Page::radio:
+            if (radio_ui_.select(long_press)) show_menu();
+            break;
         case Page::menu:
             if (!carousel_busy_) {
                 open_selected();
@@ -430,6 +454,82 @@ private:
     }
 #endif
 
+
+#ifdef M5_STICKS3_RADIO_SMOKE_TEST
+    static void radio_smoke_callback(lv_timer_t* timer)
+    {
+        static_cast<UiController*>(lv_timer_get_user_data(timer))->advance_radio_smoke_test();
+    }
+
+    void start_radio_smoke_test()
+    {
+        radio_smoke_step_ = 0;
+        radio_smoke_timer_ = lv_timer_create(radio_smoke_callback, 1500, this);
+        ESP_LOGI(kTag, "RADIO smoke scheduled: real scans, no automatic peer connections");
+    }
+
+    void advance_radio_smoke_test()
+    {
+        // Each screenshot uses a PSRAM draw buffer. Only the dedicated smoke
+        // build exports frames, and it never displays passwords or API tokens.
+        switch (radio_smoke_step_++) {
+        case 0:
+            show_radio(RadioUi::Kind::wifi);
+            radio_ui_.capture("wifi_overview");
+            radio_ui_.smoke_step(1);
+            lv_timer_set_period(radio_smoke_timer_, 12000);
+            break;
+        case 1:
+            radio_ui_.smoke_step(2);
+            radio_ui_.capture("wifi_scan");
+            lv_timer_set_period(radio_smoke_timer_, 1500);
+            break;
+        case 2:
+            radio_ui_.smoke_step(3);
+            radio_ui_.capture("wifi_detail");
+            break;
+        case 3:
+            radio_ui_.smoke_step(4);
+            radio_ui_.capture("wifi_traffic");
+            break;
+        case 4:
+            show_menu();
+            show_radio(RadioUi::Kind::bluetooth);
+            radio_ui_.capture("ble_overview");
+            radio_ui_.smoke_step(1);
+            lv_timer_set_period(radio_smoke_timer_, 12000);
+            break;
+        case 5:
+            radio_ui_.smoke_step(2);
+            radio_ui_.capture("ble_scan");
+            lv_timer_set_period(radio_smoke_timer_, 1500);
+            break;
+        case 6:
+            radio_ui_.smoke_step(3);
+            radio_ui_.capture("ble_detail");
+            break;
+        case 7:
+            radio_ui_.smoke_step(4);
+            radio_ui_.capture("ble_traffic");
+            break;
+        case 8:
+            radio_ui_.smoke_step(5);
+            radio_ui_.capture("ble_link");
+            break;
+        case 9:
+            radio_ui_.smoke_step(6);
+            radio_ui_.capture("ble_services");
+            break;
+        default:
+            show_menu();
+            lv_timer_delete(radio_smoke_timer_);
+            radio_smoke_timer_ = nullptr;
+            ESP_LOGI(kTag, "RADIO smoke complete: WiFi/BLE pages and scan lists exercised");
+            break;
+        }
+    }
+#endif
+
     void update()
     {
         if (current_page_ == Page::motion) {
@@ -438,6 +538,8 @@ private:
             update_system();
         } else if (current_page_ == Page::game) {
             update_game();
+        } else if (current_page_ == Page::radio) {
+            radio_ui_.update();
         }
     }
 
@@ -488,11 +590,11 @@ private:
         start_loop_animation(selector_glow_, anim_border_opa, LV_OPA_20, LV_OPA_70,
                              1100, 1100);
 
-        constexpr std::array<const char*, 5> symbols = {
+        constexpr std::array<const char*, 7> symbols = {
             LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS,
-            LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY};
-        constexpr std::array<const char*, 5> titles = {
-            "MOTION", "AURA", "SYSTEM", "WAVE", "ARCADE"};
+            LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH};
+        constexpr std::array<const char*, 7> titles = {
+            "MOTION", "AURA", "SYSTEM", "WAVE", "ARCADE", "WIFI", "BLE"};
         for (size_t index = 0; index < cards_.size(); ++index) {
             lv_obj_t* card = create_glass_panel(menu_screen_, 31, 148, 72, 72);
             cards_[index] = card;
@@ -1194,12 +1296,14 @@ private:
 
     void update_carousel(bool boot)
     {
-        constexpr std::array<const char*, 5> descriptions = {
+        constexpr std::array<const char*, 7> descriptions = {
             "On-demand 100 Hz VQF",
             "Layered aura animation",
             "Memory and uptime",
             "G4 + G5 square wave",
             "Three pocket games",
+            "WiFi scan / connect",
+            "BLE scan / analyzer",
         };
         lv_obj_move_foreground(cards_[selected_]);
         for (size_t index = 0; index < cards_.size(); ++index) {
@@ -1270,6 +1374,12 @@ private:
             target = wave_screen_;
             set_wave_output(true);
             break;
+        case 5:
+            show_radio(RadioUi::Kind::wifi);
+            return;
+        case 6:
+            show_radio(RadioUi::Kind::bluetooth);
+            return;
         default:
             current_page_ = Page::arcade;
             target = arcade_screen_;
@@ -1279,8 +1389,27 @@ private:
         lv_screen_load_anim(target, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, kTransitionMs, 0, false);
     }
 
+    void show_radio(RadioUi::Kind kind)
+    {
+        lv_obj_t* target = radio_ui_.open(kind);
+        if (!target) {
+            ESP_LOGE(kTag, "insufficient memory for radio UI");
+            return;
+        }
+        current_page_ = Page::radio;
+        // The transient screen has explicit ownership; immediate load avoids
+        // deleting a screen still referenced by a delayed slide transition.
+        lv_screen_load(target);
+    }
+
     void show_menu()
     {
+        if (current_page_ == Page::radio) {
+            current_page_ = Page::menu;
+            lv_screen_load(menu_screen_);
+            radio_ui_.close();
+            return;
+        }
         if (current_page_ == Page::motion) {
             request_motion_enabled(false);
         } else if (current_page_ == Page::wave) {
@@ -1718,7 +1847,8 @@ private:
     lv_obj_t* wave_screen_ = nullptr;
     lv_obj_t* arcade_screen_ = nullptr;
     lv_obj_t* game_screen_ = nullptr;
-    std::array<lv_obj_t*, 5> cards_{};
+    std::array<lv_obj_t*, 7> cards_{};
+    RadioUi radio_ui_{};
     lv_obj_t* selector_glow_ = nullptr;
     lv_obj_t* menu_hint_ = nullptr;
 
@@ -1793,6 +1923,10 @@ private:
 #ifdef M5_STICKS3_HW_SMOKE_TEST
     lv_timer_t* smoke_timer_ = nullptr;
     uint8_t smoke_step_ = 0;
+#endif
+#ifdef M5_STICKS3_RADIO_SMOKE_TEST
+    lv_timer_t* radio_smoke_timer_ = nullptr;
+    uint8_t radio_smoke_step_ = 0;
 #endif
     Page current_page_ = Page::menu;
     int selected_ = 0;

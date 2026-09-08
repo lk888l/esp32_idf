@@ -1,4 +1,4 @@
-# M5-StickS3 Motion UI + Pocket Arcade
+# M5-StickS3 Motion UI + Pocket Arcade + Radio Analyzer
 
 这是一个基于 ESP-IDF 5.5、LVGL 9 和 VQF 的 M5-StickS3 工程。工程沿用
 `esp_idf_template` 的 `AppModule` / `AppManager` / `AppTask` 分层方式，并参考
@@ -16,6 +16,8 @@
 - `MOTION` 页面：BMI270 原始加速度、VQF 四元数派生的 Roll/Pitch/Yaw、动态姿态仪
 - `AURA` 页面：低速多层环形/粒子动画，用于展示偏重质量的动画风格
 - `SYSTEM` 页面：Wi-Fi IP、BLE 状态、堆内存、PSRAM 和运行时间
+- `WIFI` / `BLE` 页面：附近设备扫描、RSSI / 链路分析、运行时连接与开关、应用流量与 echo 回显
+- 双按键 Wi-Fi 密码编辑、设备热点密码查看、BLE 主动连接与主服务 UUID 分析
 - `ARCADE` 页面：三款针对 135×240 小屏和双按键设计的小游戏
 - `TILT QUEST`：倾斜设备控制小球绕过障碍，45 秒内收集 5 个信标
 - `METEOR DODGE`：倾斜左右闪避陨石，KEY2 启动带冷却时间的护盾
@@ -28,6 +30,15 @@
 游戏规则位于独立的 `mini_games` 组件，不依赖 LVGL 或 ESP-IDF，主机测试可直接
 覆盖物理边界、计时、护盾冷却和跳跃周期。需要姿态的游戏按需启动 BMI270，离开
 游戏后释放传感器；纯按键游戏不会额外开启 IMU。
+
+## 无线界面快速操作
+
+主菜单用 **KEY1** 找到 **WIFI** 或 **BLE**，**KEY2** 打开。分析主页底部是当前动作：
+**KEY1 切换，KEY2 执行，长按 KEY2 返回**。进入 Scan nearby 后用 KEY1 选择结果、
+KEY2 查看详情；Wi-Fi 可输入密码连接，BLE 可连接可连接的广播设备并查看主服务。
+
+完整操作与边界见 [图形界面说明](docs/radio-ui.md)，实机结果见
+[2026-09-08 验收记录](docs/radio-ui.md#本轮验收记录2026-09-08)。
 
 ## 小游戏操作
 
@@ -110,11 +121,15 @@ ctest --test-dir build/host-tests --output-on-failure
 ## 实机冒烟测试
 
 默认关闭的 `M5_STICKS3_HW_SMOKE_TEST` 会自动依次运行三款游戏，并验证 BMI270 的
-启动、100 Hz 采样和释放流程；结束后自动回到主菜单。请使用独立构建目录，避免
-测试开关污染正式固件缓存：
+启动、100 Hz 采样和释放流程；结束后自动回到主菜单。请同时使用独立构建目录与独立 SDKCONFIG，避免
+测试配置写回正式 sdkconfig；以下命令在已加载 IDF 环境的容器工程目录执行：
 
 ```bash
-idf.py -B build/hw-smoke -D M5_STICKS3_HW_SMOKE_TEST=ON build
+mkdir -p build
+cp sdkconfig build/hw-smoke.sdkconfig
+idf.py -B build/hw-smoke \
+  -D SDKCONFIG="$PWD/build/hw-smoke.sdkconfig" \
+  -D M5_STICKS3_HW_SMOKE_TEST=ON -D M5_STICKS3_RADIO_SMOKE_TEST=OFF build
 idf.py -B build/hw-smoke -p /dev/ttyACM0 flash monitor
 ```
 
@@ -122,6 +137,27 @@ idf.py -B build/hw-smoke -p /dev/ttyACM0 flash monitor
 
 ## Wi-Fi / BLE 通信框架
 
-新增 Wi-Fi STA + 独立密码备用热点、NimBLE GATT 加密收发、公共 API v1、NVS 配置与有界异步命令队列。SYSTEM 页面可查看 IP 和 BLE 状态。
+Wi-Fi STA + 独立密码备用热点、NimBLE GATT 加密收发、公共 API v1、NVS 配置与有界异步命令队列继续沿用原有架构。WIFI / BLE 卡片提供图形分析与运行时操作，SYSTEM 保留 IP 和 BLE 概览。
 
-完整架构、配网步骤、接口协议、客户端用法与验证方式见 [通信框架文档](docs/connectivity.md)。
+设备操作见 [Wi-Fi / BLE 图形界面说明](docs/radio-ui.md)，包含扫描连接、双按键密码输入、BLE 双角色、流量统计口径和已实现边界。完整架构、接口协议、客户端用法与验证方式见 [通信框架文档](docs/connectivity.md)。
+
+## 无线接口回归
+
+连接设备热点或所在局域网后，可从电脑执行：
+
+~~~bash
+python tests/connectivity_api_test.py --url http://192.168.4.1
+python tests/radio_api_test.py --url http://192.168.4.1
+python tests/radio_api_test.py --url http://192.168.4.1 --scan
+python tests/connectivity_ble_test.py --ble <设备BLE地址>
+~~~
+
+前两项默认只查询或验证拒绝路径；--scan 会对两种已启用无线各发起一次真实扫描，
+需要预先设置 M5_API_TOKEN，不会连接扫描到的陌生设备或更改已保存 Wi-Fi 凭据。
+BLE 回归需要主机开启蓝牙并安装 Bleak。运行时保持设备操作空闲，避免其他命令覆盖
+最近完成状态。无线开关和主动连接的验收范围见
+[本轮验收记录](docs/radio-ui.md#本轮验收记录2026-09-08)。
+
+图形页面巡检使用独立 M5_STICKS3_RADIO_SMOKE_TEST 构建；截图需
+CONFIG_LV_USE_SNAPSHOT=y。它与游戏 M5_STICKS3_HW_SMOKE_TEST 互斥，
+只扫描和展示，不自动连接陌生设备；验证后重新烧录正式固件。

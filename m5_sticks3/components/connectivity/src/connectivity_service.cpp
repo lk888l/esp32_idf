@@ -34,6 +34,13 @@ namespace {
 constexpr char kTag[] = "connectivity";
 portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 Snapshot shared_state{};
+WifiDiagnostics shared_wifi{};
+BleDiagnostics shared_ble{};
+TrafficSnapshot shared_traffic{};
+char local_ap_password[17]{};
+using LocalSubmit = esp_err_t (*)(void*, const ControlRequest&);
+LocalSubmit local_submit = nullptr;
+void* local_context = nullptr;
 void publish(const Snapshot& value)
 {
     portENTER_CRITICAL(&state_lock);
@@ -47,7 +54,7 @@ struct Settings {
     char ap_password[17]{};
 };
 struct Command {
-    WifiCredentials wifi{};
+    ControlRequest control{};
     uint32_t id = 0;
 };
 using Json = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
@@ -89,6 +96,7 @@ bool copy_string(const cJSON* value, char* output, size_t capacity)
 bool bounded_json(const char* text, size_t length)
 {
     if (!text || !length || length > kMaxRequestBytes || memchr(text, 0, length)) return false;
+    if (!valid_utf8({text, length})) return false;
     bool quoted = false;
     unsigned depth = 0;
     for (size_t i = 0; i < length; ++i) {
@@ -125,6 +133,46 @@ Snapshot snapshot()
     portEXIT_CRITICAL(&state_lock);
     return value;
 }
+WifiDiagnostics wifi_diagnostics()
+{
+    portENTER_CRITICAL(&state_lock);
+    const auto value = shared_wifi;
+    portEXIT_CRITICAL(&state_lock);
+    return value;
+}
+BleDiagnostics ble_diagnostics()
+{
+    portENTER_CRITICAL(&state_lock);
+    const auto value = shared_ble;
+    portEXIT_CRITICAL(&state_lock);
+    return value;
+}
+TrafficSnapshot traffic_snapshot()
+{
+    portENTER_CRITICAL(&state_lock);
+    const auto value = shared_traffic;
+    portEXIT_CRITICAL(&state_lock);
+    return value;
+}
+esp_err_t request_control(const ControlRequest& request)
+{
+    // The bridge and its owner are detached under this same lock before teardown.
+    // Submission only copies to a zero-wait fixed queue, never invokes a driver.
+    portENTER_CRITICAL(&state_lock);
+    const esp_err_t result = local_submit ? local_submit(local_context, request) : ESP_ERR_INVALID_STATE;
+    portEXIT_CRITICAL(&state_lock);
+    return result;
+}
+bool copy_local_ap_password(char* output, size_t capacity)
+{
+    if (!output || capacity < sizeof(local_ap_password)) return false;
+    portENTER_CRITICAL(&state_lock);
+    const bool available = local_submit && local_ap_password[0];
+    if (available) memcpy(output, local_ap_password, sizeof(local_ap_password));
+    else output[0] = '\0';
+    portEXIT_CRITICAL(&state_lock);
+    return available;
+}
 const char* wifi_state_name(WifiState state)
 {
     switch (state) {
@@ -158,11 +206,93 @@ struct Service::Impl {
     alignas(Command) std::array<uint8_t, sizeof(Command) * kCommandCapacity> queue_storage{};
     StaticQueue_t queue_state{};
     QueueHandle_t queue = nullptr;
+    uint32_t local_sequence = 0x40000000;
 
     Impl()
     {
         queue = xQueueCreateStatic(kCommandCapacity, sizeof(Command),
                                    queue_storage.data(), &queue_state);
+    }
+
+    static esp_err_t submit_local(void* context, const ControlRequest& request)
+    {
+        auto& self = *static_cast<Impl*>(context);
+        return self.enqueue(request, ++self.local_sequence);
+    }
+
+    esp_err_t enqueue(const ControlRequest& request, uint32_t id)
+    {
+        if (!accepting.load(std::memory_order_acquire)) return ESP_ERR_INVALID_STATE;
+        switch (request.action) {
+        case ControlAction::wifi_connect:
+            if (!valid_credentials(request.wifi)) return ESP_ERR_INVALID_ARG;
+            break;
+        case ControlAction::ble_connect:
+            if (strnlen(request.address, sizeof(request.address)) != 17 ||
+                !valid_ble_address(request.address) || request.address_type > 3) return ESP_ERR_INVALID_ARG;
+            break;
+        case ControlAction::wifi_scan: case ControlAction::wifi_reconnect:
+        case ControlAction::wifi_disconnect: case ControlAction::wifi_enable:
+        case ControlAction::wifi_disable: case ControlAction::wifi_clear:
+        case ControlAction::ble_scan: case ControlAction::ble_disconnect:
+        case ControlAction::ble_enable: case ControlAction::ble_disable:
+            break;
+        default: return ESP_ERR_INVALID_ARG;
+        }
+        if (request.action <= ControlAction::wifi_clear) {
+#if !CONFIG_M5_CONNECTIVITY_WIFI_ENABLED
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+        } else {
+#if !CONFIG_M5_CONNECTIVITY_BLE_ENABLED
+            return ESP_ERR_NOT_SUPPORTED;
+#endif
+        }
+        Command command{request, id};
+        if (!queue || xQueueSend(queue, &command, 0) != pdPASS) return ESP_ERR_TIMEOUT;
+        accepted.fetch_add(1, std::memory_order_relaxed);
+        return ESP_OK;
+    }
+
+    esp_err_t execute(const ControlRequest& request)
+    {
+        switch (request.action) {
+        case ControlAction::wifi_scan: return wifi.request_scan();
+        case ControlAction::wifi_enable: return wifi.set_enabled(true);
+        case ControlAction::wifi_disable: return wifi.set_enabled(false);
+        case ControlAction::wifi_disconnect: return wifi.disconnect_station();
+        case ControlAction::wifi_reconnect: {
+            if (!settings.wifi.ssid[0]) return ESP_ERR_NOT_FOUND;
+            esp_err_t result = wifi.configuration_ready();
+            if (result != ESP_OK) return result;
+            if (!wifi.diagnostics().enabled) result = wifi.set_enabled(true);
+            return result == ESP_OK ? wifi.configure(settings.wifi) : result;
+        }
+        case ControlAction::ble_scan: return ble.request_scan();
+        case ControlAction::ble_enable: return ble.set_enabled(true);
+        case ControlAction::ble_disable: return ble.set_enabled(false);
+        case ControlAction::ble_connect: return ble.connect_peer(request.address, request.address_type);
+        case ControlAction::ble_disconnect: return ble.disconnect_peer();
+        case ControlAction::wifi_clear: case ControlAction::wifi_connect: {
+            // Do not persist a selection which cannot be applied until an
+            // already-running scan is finished. Only this owner starts scans.
+            const esp_err_t ready = wifi.configuration_ready();
+            if (ready != ESP_OK) return ready;
+            const WifiCredentials credentials = request.action == ControlAction::wifi_clear
+                ? WifiCredentials{} : request.wifi;
+            esp_err_t result = ESP_OK;
+            if (memcmp(&credentials, &settings.wifi, sizeof(credentials)) != 0) {
+                Settings updated = settings;
+                updated.wifi = credentials;
+                result = persist(updated);
+                if (result == ESP_OK) settings.wifi = updated.wifi;
+            }
+            if (result == ESP_OK && request.action == ControlAction::wifi_connect &&
+                !wifi.diagnostics().enabled) result = wifi.set_enabled(true);
+            return result == ESP_OK ? wifi.configure(credentials) : result;
+        }
+        }
+        return ESP_ERR_INVALID_ARG;
     }
 
     esp_err_t persist(const Settings& value)
@@ -204,23 +334,61 @@ struct Service::Impl {
         state.accepted = accepted.load(std::memory_order_relaxed);
         state.rejected = rejected.load(std::memory_order_relaxed);
         publish(state);
+        // Transport snapshots never nest their locks with this publication lock.
+        const auto wifi_data = wifi.diagnostics();
+        const auto ble_data = ble.diagnostics();
+        portENTER_CRITICAL(&state_lock);
+        shared_wifi = wifi_data;
+        shared_ble = ble_data;
+        portEXIT_CRITICAL(&state_lock);
     }
 
-    static void handle(void* context, const char* input, size_t length,
-                       char* output, size_t capacity)
+    static void handle_wifi(void* context, const char* input, size_t length,
+                            char* output, size_t capacity)
     {
-        auto& self = *static_cast<Impl*>(context);
-        self.request(input, length, output, capacity);
+        static_cast<Impl*>(context)->request(input, length, output, capacity, false);
+    }
+    static void handle_ble(void* context, const char* input, size_t length,
+                           char* output, size_t capacity)
+    {
+        static_cast<Impl*>(context)->request(input, length, output, capacity, true);
     }
 
-    void request(const char* input, size_t length, char* output, size_t capacity)
+    void request(const char* input, size_t length, char* output, size_t capacity, bool from_ble)
     {
+        struct Record {
+            bool ble;
+            size_t length;
+            char* output;
+            size_t capacity;
+            uint32_t id = 0;
+            bool success = true;
+            char operation[24] = "invalid";
+            char echo[65]{};
+            bool has_echo = false;
+            ~Record()
+            {
+                portENTER_CRITICAL(&state_lock);
+                auto& value = shared_traffic;
+                if (ble) ++value.ble_requests; else ++value.http_requests;
+                value.rx_bytes += length;
+                value.tx_bytes += output ? strnlen(output, capacity) : 0;
+                strcpy(value.last_transport, ble ? "BLE" : "HTTP");
+                memcpy(value.last_operation, operation, sizeof(operation));
+                value.last_request_id = id;
+                value.last_ok = success;
+                if (has_echo) memcpy(value.echo, echo, sizeof(echo));
+                portEXIT_CRITICAL(&state_lock);
+            }
+        } record{from_ble, length, output, capacity};
         uint32_t id = 0;
         const auto fail = [&](const char* why) {
+            record.success = false;
             rejected.fetch_add(1, std::memory_order_relaxed);
             error_response(output, capacity, id, why);
         };
-        if (!output || capacity < 96) return;
+        if (!output || capacity < 96) { record.success = false; return; }
+        output[0] = '\0';
         if (!accepting.load(std::memory_order_acquire)) { fail("unavailable"); return; }
         if (!bounded_json(input, length)) { fail("invalid_json"); return; }
         std::array<char, kMaxRequestBytes + 1> buffer{};
@@ -243,6 +411,14 @@ struct Service::Impl {
         }
         id = static_cast<uint32_t>(request_id->valuedouble);
         const std::string_view op(operation->valuestring);
+        record.id = id;
+        // Only operation names and an explicitly requested echo are displayed;
+        // credentials and arbitrary request JSON never enter the analyzer log.
+        for (size_t i = 0; i < op.size() && i + 1 < sizeof(record.operation); ++i) {
+            const unsigned char c = op[i];
+            record.operation[i] = c >= 32 && c <= 126 ? c : '?';
+            record.operation[i + 1] = '\0';
+        }
         Json response(cJSON_CreateObject(), cJSON_Delete);
         if (!response) { fail("no_memory"); return; }
         if (!cJSON_AddNumberToObject(response.get(), "v", 1) ||
@@ -255,7 +431,11 @@ struct Service::Impl {
             built = cJSON_AddNumberToObject(response.get(), key, value) != nullptr && built;
         };
         auto string = [&](const char* key, const char* value) {
-            built = cJSON_AddStringToObject(response.get(), key, value) != nullptr && built;
+            // SSIDs are arbitrary octets. Preserve valid UTF-8; replace invalid
+            // bytes for JSON display without changing the stored scan target.
+            char safe[129]{};
+            copy_display_utf8(value, safe, sizeof(safe));
+            built = cJSON_AddStringToObject(response.get(), key, safe) != nullptr && built;
         };
         if (op == "ping") {
             string("reply", "pong");
@@ -263,6 +443,11 @@ struct Service::Impl {
             char echo[129]{};
             if (!copy_string(get("data"), echo, sizeof(echo))) { fail("invalid_data"); return; }
             string("data", echo);
+            record.has_echo = true;
+            for (size_t i = 0; echo[i] && i + 1 < sizeof(record.echo); ++i) {
+                const unsigned char c = echo[i];
+                record.echo[i] = c >= 32 && c <= 126 ? c : '.';
+            }
         } else if (op == "status") {
             const auto current = connectivity::snapshot();
             string("wifi", wifi_state_name(current.wifi.state));
@@ -293,31 +478,93 @@ struct Service::Impl {
             number("roll", motion.roll_deg);
             number("pitch", motion.pitch_deg);
             number("yaw", motion.yaw_deg);
-        } else if (op == "wifi.configure" || op == "wifi.clear") {
+        } else if (op == "wifi.scan.results" || op == "ble.scan.results" || op == "ble.peer") {
+            const cJSON* index_json = get("index");
+            unsigned index = 0;
+            if (index_json) {
+                if (!cJSON_IsNumber(index_json) || !std::isfinite(index_json->valuedouble) ||
+                    index_json->valuedouble < 0 || index_json->valuedouble > 255 ||
+                    floor(index_json->valuedouble) != index_json->valuedouble) {
+                    fail("invalid_index"); return;
+                }
+                index = static_cast<unsigned>(index_json->valuedouble);
+            }
+            if (op == "wifi.scan.results") {
+                const auto data = wifi_diagnostics();
+                number("enabled", data.enabled); number("scanning", data.scanning);
+                number("generation", data.generation); number("count", data.count);
+                number("total", data.total_found); number("error", data.scan_error);
+                number("current_channel", data.channel); number("ap_clients", data.ap_clients);
+                if (index < data.count) {
+                    const auto& row = data.networks[index];
+                    number("index", index); string("ssid", row.ssid); string("bssid", row.bssid);
+                    number("rssi", row.rssi); number("channel", row.channel); number("auth", row.auth);
+                } else if (index != 0) { fail("invalid_index"); return; }
+            } else if (op == "ble.scan.results") {
+                const auto data = ble_diagnostics();
+                number("enabled", data.enabled); number("scanning", data.scanning);
+                number("generation", data.generation); number("count", data.count);
+                number("total", data.total_found); number("error", data.scan_error);
+                if (index < data.count) {
+                    const auto& row = data.devices[index];
+                    number("index", index); string("name", row.name); string("address", row.address);
+                    number("rssi", row.rssi); number("address_type", row.address_type);
+                    number("connectable", row.connectable);
+                } else if (index != 0) { fail("invalid_index"); return; }
+            } else {
+                const auto data = ble_diagnostics();
+                number("enabled", data.enabled); number("connecting", data.connecting);
+                number("connected", data.peer_connected); string("address", data.peer_address);
+                string("name", data.peer_name); number("rssi", data.peer_rssi);
+                number("mtu", data.peer_mtu); number("error", data.peer_error);
+                number("service_count", data.service_count);
+                if (index < data.service_count) { number("index", index); string("service", data.services[index]); }
+                else if (index != 0) { fail("invalid_index"); return; }
+            }
+        } else if (op == "traffic") {
+            const auto data = traffic_snapshot();
+            number("http_requests", data.http_requests); number("ble_requests", data.ble_requests);
+            number("rx_bytes", data.rx_bytes); number("tx_bytes", data.tx_bytes);
+            string("transport", data.last_transport); string("operation", data.last_operation);
+            number("request_id", data.last_request_id); number("success", data.last_ok);
+            string("echo", data.echo);
+        } else {
+            ControlRequest command{};
+            if (op == "wifi.configure") command.action = ControlAction::wifi_connect;
+            else if (op == "wifi.clear") command.action = ControlAction::wifi_clear;
+            else if (op == "wifi.scan") command.action = ControlAction::wifi_scan;
+            else if (op == "wifi.reconnect") command.action = ControlAction::wifi_reconnect;
+            else if (op == "wifi.disconnect") command.action = ControlAction::wifi_disconnect;
+            else if (op == "wifi.enable") command.action = ControlAction::wifi_enable;
+            else if (op == "wifi.disable") command.action = ControlAction::wifi_disable;
+            else if (op == "ble.scan") command.action = ControlAction::ble_scan;
+            else if (op == "ble.connect") command.action = ControlAction::ble_connect;
+            else if (op == "ble.disconnect") command.action = ControlAction::ble_disconnect;
+            else if (op == "ble.enable") command.action = ControlAction::ble_enable;
+            else if (op == "ble.disable") command.action = ControlAction::ble_disable;
+            else { fail("unknown_operation"); return; }
             char token[33]{};
             if (!copy_string(get("token"), token, sizeof(token)) ||
                 !constant_time_equal(token, settings.token)) { fail("unauthorized"); return; }
-#if CONFIG_M5_CONNECTIVITY_WIFI_ENABLED
-            Command command{};
-            command.id = id;
-            if (op == "wifi.configure" &&
+            if (command.action == ControlAction::wifi_connect &&
                 (!copy_string(get("ssid"), command.wifi.ssid, sizeof(command.wifi.ssid)) ||
                  !copy_string(get("password"), command.wifi.password, sizeof(command.wifi.password)) ||
-                 !valid_credentials(command.wifi))) {
-                fail("invalid_credentials"); return;
+                 !valid_credentials(command.wifi))) { fail("invalid_credentials"); return; }
+            if (command.action == ControlAction::ble_connect) {
+                const auto* type = get("address_type");
+                if (!copy_string(get("address"), command.address, sizeof(command.address)) ||
+                    !valid_ble_address(command.address) || !cJSON_IsNumber(type) ||
+                    type->valuedouble < 0 || type->valuedouble > 3 ||
+                    floor(type->valuedouble) != type->valuedouble) { fail("invalid_peer"); return; }
+                command.address_type = static_cast<uint8_t>(type->valuedouble);
             }
-            // Serialize before enqueue: an error reply must never conceal a side effect.
             snprintf(output, capacity,
                      "{\"v\":1,\"id\":%lu,\"ok\":true,\"result\":\"accepted\"}",
                      static_cast<unsigned long>(id));
-            if (!queue || xQueueSend(queue, &command, 0) != pdPASS) { fail("busy"); return; }
-            accepted.fetch_add(1, std::memory_order_relaxed);
+            const esp_err_t result = enqueue(command, id);
+            if (result != ESP_OK) fail(result == ESP_ERR_NOT_SUPPORTED ? "disabled" :
+                                      result == ESP_ERR_INVALID_ARG ? "invalid_command" : "busy");
             return;
-#else
-            fail("wifi_disabled"); return;
-#endif
-        } else {
-            fail("unknown_operation"); return;
         }
         if (!built) { fail("no_memory"); return; }
         if (!cJSON_PrintPreallocated(response.get(), output, capacity, false)) {
@@ -355,17 +602,20 @@ esp_err_t Service::initialize()
     snprintf(name, sizeof(name), "M5StickS3-%02X%02X%02X", mac[3], mac[4], mac[5]);
 #if CONFIG_M5_CONNECTIVITY_WIFI_ENABLED
     self.wifi_attempted = true;
-    result = self.wifi.start(Impl::handle, &self, name, self.settings.ap_password, self.settings.wifi);
+    result = self.wifi.start(Impl::handle_wifi, &self, name, self.settings.ap_password, self.settings.wifi);
     if (result != ESP_OK) return result;
     self.wifi_started = true;
 #endif
 #if CONFIG_M5_CONNECTIVITY_BLE_ENABLED
     self.ble_attempted = true;
-    result = self.ble.start(name, Impl::handle, &self);
+    result = self.ble.start(name, Impl::handle_ble, &self);
     if (result != ESP_OK) return result;
     self.ble_started = true;
 #endif
     self.initialized = true;
+    portENTER_CRITICAL(&state_lock);
+    memcpy(local_ap_password, self.settings.ap_password, sizeof(local_ap_password));
+    portEXIT_CRITICAL(&state_lock);
     self.update();
     ESP_LOGI(kTag, "ready: %s (API v1)", name);
     // Physical USB console is the bootstrap channel; never return these over radio.
@@ -382,23 +632,16 @@ void Service::process()
     // AppManager dispatches process only after every module initialized.
     // Do not acknowledge commands while a later module can still roll back.
     self.accepting.store(true, std::memory_order_release);
+    portENTER_CRITICAL(&state_lock);
+    local_context = &self;
+    local_submit = Impl::submit_local;
+    portEXIT_CRITICAL(&state_lock);
     self.wifi.process();
+    self.ble.process();
     Command command{};
     // One command per tick bounds application-loop latency and flash activity.
     if (xQueueReceive(self.queue, &command, 0) == pdPASS) {
-        esp_err_t result = ESP_OK;
-        if (memcmp(&command.wifi, &self.settings.wifi, sizeof(command.wifi)) != 0) {
-            Settings updated = self.settings;
-            updated.wifi = command.wifi;
-            // Commit first: accepted settings survive power loss during reconnect.
-            result = self.persist(updated);
-            if (result == ESP_OK) {
-                self.settings.wifi = updated.wifi;
-            }
-        }
-        // Reapply even identical persisted credentials, allowing recovery after a
-        // previous driver failure without another flash write.
-        if (result == ESP_OK) result = self.wifi.configure(command.wifi);
+        const esp_err_t result = self.execute(command.control);
         self.state.last_id = command.id;
         self.state.last_error = result;
         ++self.state.completed;
@@ -412,6 +655,11 @@ esp_err_t Service::deinitialize()
 {
     auto& self = *impl_;
     self.accepting.store(false, std::memory_order_release);
+    portENTER_CRITICAL(&state_lock);
+    local_submit = nullptr;
+    local_context = nullptr;
+    memset(local_ap_password, 0, sizeof(local_ap_password));
+    portEXIT_CRITICAL(&state_lock);
     // Keep the facade and its queue alive until every transport callback exits.
     if (self.ble_attempted) {
         const esp_err_t result = self.ble.stop();

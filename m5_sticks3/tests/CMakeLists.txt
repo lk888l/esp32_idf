@@ -27,3 +27,12 @@ target_include_directories(connectivity_host_tests PRIVATE
 enable_testing()
 add_test(NAME app_host_tests COMMAND app_host_tests)
 add_test(NAME connectivity_host_tests COMMAND connectivity_host_tests)
+
+add_executable(ble_bond_store_tests ble_bond_store_tests.cpp)
+target_compile_features(ble_bond_store_tests PRIVATE cxx_std_20)
+target_compile_options(ble_bond_store_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(ble_bond_store_tests PRIVATE
+    ble_bond_stubs
+    ../components/connectivity/src
+)
+add_test(NAME ble_bond_store_tests COMMAND ble_bond_store_tests)

@@ -4,14 +4,18 @@
 
 #if CONFIG_M5_CONNECTIVITY_BLE_ENABLED && CONFIG_BT_NIMBLE_ENABLED
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <new>
 
 #include "app_task.hpp"
+#include "ble_bond_store.hpp"
 #include "connectivity_policy.hpp"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/queue.h"
 #include "host/ble_att.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
@@ -24,6 +28,7 @@
 #include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "store/config/ble_store_config.h"
 
 // IDF's store/config header omits this initialization entry point.
 extern "C" void ble_store_config_init(void);
@@ -72,6 +77,8 @@ struct BleTransport::Impl final : AppTask {
         services[0].uuid = &kServiceUuid.u;
         services[0].characteristics = characteristics;
         clear_response();
+        commands = xQueueCreateStatic(kCommandCapacity, sizeof(Command),
+                                      command_storage, &command_control);
     }
 
     void main() override { nimble_port_run(); }
@@ -92,6 +99,500 @@ struct BleTransport::Impl final : AppTask {
         return result;
     }
 
+
+    enum class CommandKind : uint8_t { scan, connect, disconnect, enable };
+    struct Command {
+        CommandKind kind{};
+        ble_addr_t address{};
+        char peer_name[32]{};
+        bool enabled = false;
+    };
+    static constexpr UBaseType_t kCommandCapacity = 4;
+    // Bound address accounting independently from the strongest-16 result list.
+    static constexpr size_t kTrackedAddresses = 128;
+
+    template <typename Update>
+    void update_diagnostics(Update update)
+    {
+        portENTER_CRITICAL(&state_lock);
+        update(analyzer);
+        portEXIT_CRITICAL(&state_lock);
+    }
+
+    BleDiagnostics diagnostics()
+    {
+        portENTER_CRITICAL(&state_lock);
+        const BleDiagnostics result = analyzer;
+        portEXIT_CRITICAL(&state_lock);
+        return result;
+    }
+
+
+    bool is_scanning()
+    {
+        portENTER_CRITICAL(&state_lock);
+        const bool result = analyzer.scanning;
+        portEXIT_CRITICAL(&state_lock);
+        return result;
+    }
+
+    bool is_connecting()
+    {
+        portENTER_CRITICAL(&state_lock);
+        const bool result = analyzer.connecting;
+        portEXIT_CRITICAL(&state_lock);
+        return result;
+    }
+
+    void refresh_enabled()
+    {
+        bool active_radio = radio_enabled.load(std::memory_order_acquire) ||
+                            ble_gap_adv_active() ||
+                            connection != BLE_HS_CONN_HANDLE_NONE ||
+                            peer_connection != BLE_HS_CONN_HANDLE_NONE;
+#if CONFIG_BT_NIMBLE_ROLE_OBSERVER
+        active_radio = active_radio || ble_gap_disc_active();
+#endif
+#if CONFIG_BT_NIMBLE_ROLE_CENTRAL
+        active_radio = active_radio || ble_gap_conn_active();
+#endif
+        // Disabled becomes visible only after advertising, scan/initiation and
+        // both links are actually stopped. Failures remain visible as enabled.
+        update_state([active_radio](BleSnapshot& value) { value.enabled = active_radio; });
+        update_diagnostics([active_radio](BleDiagnostics& value) { value.enabled = active_radio; });
+    }
+
+    static void format_address(const ble_addr_t& address, char (&text)[18])
+    {
+        std::snprintf(text, sizeof(text), "%02X:%02X:%02X:%02X:%02X:%02X",
+                      address.val[5], address.val[4], address.val[3],
+                      address.val[2], address.val[1], address.val[0]);
+    }
+
+    static bool parse_address(const char* text, uint8_t type, ble_addr_t& result)
+    {
+        if (text == nullptr || strnlen(text, 18) != 17 || type > BLE_ADDR_RANDOM_ID) {
+            return false;
+        }
+        result.type = type;
+        for (unsigned index = 0; index < BLE_DEV_ADDR_LEN; ++index) {
+            const size_t offset = index * 3;
+            const auto digit = [](char value) -> int {
+                if (value >= '0' && value <= '9') return value - '0';
+                if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+                if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+                return -1;
+            };
+            const int high = digit(text[offset]);
+            const int low = digit(text[offset + 1]);
+            if (high < 0 || low < 0 || (index < 5 && text[offset + 2] != ':')) {
+                return false;
+            }
+            result.val[5 - index] = static_cast<uint8_t>((high << 4) | low);
+        }
+        return true;
+    }
+
+    esp_err_t enqueue(const Command& command)
+    {
+        if (!initialized || stopping.load(std::memory_order_acquire) ||
+            !host_synced.load(std::memory_order_acquire)) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        return xQueueSend(commands, &command, 0) == pdTRUE
+            ? ESP_OK : ESP_ERR_NO_MEM;
+    }
+
+    void record_advertisement(const ble_gap_disc_desc& report)
+    {
+        BleDevice device{};
+        format_address(report.addr, device.address);
+        device.address_type = report.addr.type;
+        device.rssi = report.rssi == 127 ? -127 : report.rssi;
+        device.connectable = report.event_type == BLE_HCI_ADV_RPT_EVTYPE_ADV_IND ||
+                             report.event_type == BLE_HCI_ADV_RPT_EVTYPE_DIR_IND;
+        ble_hs_adv_fields fields{};
+        if (ble_hs_adv_parse_fields(&fields, report.data, report.length_data) == 0 &&
+            fields.name != nullptr) {
+            const size_t length = std::min<size_t>(fields.name_len, sizeof(device.name) - 1);
+            for (size_t index = 0; index < length; ++index) {
+                const uint8_t byte = fields.name[index];
+                // Advertisements are untrusted binary data; the small built-in
+                // display font is ASCII. Never forward control bytes to it.
+                device.name[index] = byte >= 32 && byte <= 126 ? static_cast<char>(byte) : '?';
+            }
+        }
+        bool known = false;
+        for (size_t index = 0; index < seen_count; ++index) {
+            if (ble_addr_cmp(&seen_addresses[index], &report.addr) == 0) {
+                known = true;
+                break;
+            }
+        }
+        if (!known && seen_count < kTrackedAddresses) {
+            seen_addresses[seen_count++] = report.addr;
+        }
+        update_diagnostics([&](BleDiagnostics& value) {
+            // Saturates at the fixed address-accounting capacity. The list
+            // still retains the strongest devices if more addresses appear.
+            value.total_found = static_cast<uint16_t>(seen_count);
+            size_t slot = value.count;
+            for (size_t index = 0; index < value.count; ++index) {
+                const auto& existing = value.devices[index];
+                if (existing.address_type == device.address_type &&
+                    std::strcmp(existing.address, device.address) == 0) {
+                    slot = index;
+                    break;
+                }
+            }
+            if (slot < value.count) {
+                const auto& previous = value.devices[slot];
+                if (device.name[0] == '\0') {
+                    std::memcpy(device.name, previous.name, sizeof(device.name));
+                }
+                // A scan response does not carry the original connectable bit.
+                if (report.event_type == BLE_HCI_ADV_RPT_EVTYPE_SCAN_RSP) {
+                    device.connectable = previous.connectable;
+                }
+            } else if (value.count < kMaxBleDevices) {
+                ++value.count;
+            } else {
+                if (device.rssi <= value.devices[value.count - 1].rssi) {
+                    return;
+                }
+                slot = value.count - 1;
+            }
+            value.devices[slot] = device;
+            while (slot > 0 && value.devices[slot].rssi > value.devices[slot - 1].rssi) {
+                std::swap(value.devices[slot], value.devices[slot - 1]);
+                --slot;
+            }
+            while (slot + 1 < value.count &&
+                   value.devices[slot].rssi < value.devices[slot + 1].rssi) {
+                std::swap(value.devices[slot], value.devices[slot + 1]);
+                ++slot;
+            }
+        });
+    }
+
+    void begin_scan()
+    {
+#if CONFIG_BT_NIMBLE_ROLE_OBSERVER
+        if (!radio_enabled.load(std::memory_order_acquire) ||
+            is_connecting() || ble_gap_disc_active()) {
+            update_diagnostics([](BleDiagnostics& value) { value.scan_error = BLE_HS_EBUSY; });
+            return;
+        }
+        seen_count = 0;
+        update_diagnostics([](BleDiagnostics& value) {
+            value.scanning = true;
+            value.count = 0;
+            value.total_found = 0;
+            value.scan_error = 0;
+            ++value.generation;
+            for (auto& device : value.devices) device = BleDevice{};
+        });
+        ble_gap_disc_params parameters{};
+        parameters.itvl = 160;   // 100 ms interval; coexist with Wi-Fi and UI.
+        parameters.window = 80;  // 50 ms active window.
+        parameters.passive = 0;  // Collect names advertised in scan responses.
+        parameters.filter_duplicates = 1;
+        const int result = ble_gap_disc(address_type, 8000, &parameters,
+                                         analyzer_gap_event, this);
+        if (result != 0) {
+            update_diagnostics([result](BleDiagnostics& value) {
+                value.scanning = false;
+                value.scan_error = result;
+            });
+        }
+#else
+        update_diagnostics([](BleDiagnostics& value) { value.scan_error = BLE_HS_ENOTSUP; });
+#endif
+    }
+
+    void begin_connect(const Command& command)
+    {
+#if CONFIG_BT_NIMBLE_ROLE_CENTRAL
+        if (!radio_enabled.load(std::memory_order_acquire) ||
+            peer_connection != BLE_HS_CONN_HANDLE_NONE || is_connecting()) {
+            update_diagnostics([](BleDiagnostics& value) { value.peer_error = BLE_HS_EBUSY; });
+            return;
+        }
+#if CONFIG_BT_NIMBLE_ROLE_OBSERVER
+        if (ble_gap_disc_active()) {
+            const int result = ble_gap_disc_cancel();
+            if (result != 0 && result != BLE_HS_EALREADY) {
+                update_diagnostics([result](BleDiagnostics& value) { value.peer_error = result; });
+                return;
+            }
+            update_diagnostics([](BleDiagnostics& value) { value.scanning = false; });
+        }
+#endif
+        char address[18]{};
+        format_address(command.address, address);
+        update_diagnostics([&](BleDiagnostics& value) {
+            value.connecting = true;
+            value.peer_connected = false;
+            value.peer_error = 0;
+            value.peer_rssi = 0;
+            value.peer_mtu = 23;
+            value.service_count = 0;
+            std::memcpy(value.peer_address, address, sizeof(address));
+            std::memcpy(value.peer_name, command.peer_name, sizeof(value.peer_name));
+            std::memset(value.services, 0, sizeof(value.services));
+        });
+        // Only establish the user-selected link and inspect primary services;
+        // never write arbitrary remote characteristics or subscribe to them.
+        peer_connect_allowed = true;
+        peer_disconnect_requested = false;
+        const int result = ble_gap_connect(address_type, &command.address, 10000,
+                                            nullptr, analyzer_gap_event, this);
+        if (result != 0) {
+            peer_connect_allowed = false;
+            update_diagnostics([result](BleDiagnostics& value) {
+                value.connecting = false;
+                value.peer_error = result;
+            });
+        }
+#else
+        update_diagnostics([](BleDiagnostics& value) { value.peer_error = BLE_HS_ENOTSUP; });
+#endif
+    }
+
+    void end_peer_connection()
+    {
+#if CONFIG_BT_NIMBLE_ROLE_CENTRAL
+        peer_connect_allowed = false;
+        int result = 0;
+        if (is_connecting()) {
+            result = ble_gap_conn_cancel();
+            if (result == 0) peer_disconnect_requested = true;
+            if (result == BLE_HS_EALREADY) result = 0;
+        } else if (peer_connection != BLE_HS_CONN_HANDLE_NONE) {
+            result = ble_gap_terminate(peer_connection, BLE_ERR_REM_USER_CONN_TERM);
+            if (result == 0) peer_disconnect_requested = true;
+            if (result == BLE_HS_ENOTCONN) result = 0;
+        }
+        if (result != 0) {
+            update_diagnostics([result](BleDiagnostics& value) { value.peer_error = result; });
+        }
+#endif
+    }
+
+    void change_enabled(bool enabled)
+    {
+        if (bond_store.error() != 0) enabled = false;
+        radio_enabled.store(enabled, std::memory_order_release);
+        if (enabled) {
+            if (connection == BLE_HS_CONN_HANDLE_NONE && !ble_gap_adv_active()) {
+                advertise();
+            }
+            refresh_enabled();
+            return;
+        }
+        if (ble_gap_adv_active()) {
+            const int result = ble_gap_adv_stop();
+            if (result == 0 || result == BLE_HS_EALREADY) {
+                update_state([](BleSnapshot& value) { value.advertising = false; });
+            } else {
+                update_diagnostics([result](BleDiagnostics& value) { value.peer_error = result; });
+            }
+        }
+#if CONFIG_BT_NIMBLE_ROLE_OBSERVER
+        if (ble_gap_disc_active()) {
+            const int result = ble_gap_disc_cancel();
+            update_diagnostics([result](BleDiagnostics& value) {
+                value.scanning = result != 0 && result != BLE_HS_EALREADY;
+                if (value.scanning) value.scan_error = result;
+            });
+        }
+#endif
+        end_peer_connection();
+        if (connection != BLE_HS_CONN_HANDLE_NONE) {
+            const int result = ble_gap_terminate(connection, BLE_ERR_REM_USER_CONN_TERM);
+            if (result != 0 && result != BLE_HS_ENOTCONN) {
+                update_diagnostics([result](BleDiagnostics& value) { value.peer_error = result; });
+            }
+        }
+        refresh_enabled();
+    }
+
+    static int service_discovered(uint16_t handle, const ble_gatt_error* error,
+                                  const ble_gatt_svc* service, void* argument)
+    {
+        auto* self = static_cast<Impl*>(argument);
+        if (handle != self->peer_connection || self->stopping.load(std::memory_order_acquire)) {
+            return BLE_HS_EDONE;
+        }
+        if (error->status == BLE_HS_EDONE) {
+            ESP_LOGI(kTag, "analyzer service discovery complete; retained=%u",
+                     static_cast<unsigned>(self->diagnostics().service_count));
+            return 0;
+        }
+        if (error->status != 0) {
+            ESP_LOGW(kTag, "analyzer service discovery failed: %d", error->status);
+            self->update_diagnostics([error](BleDiagnostics& value) {
+                value.peer_error = error->status;
+            });
+            return 0;
+        }
+        if (service != nullptr) {
+            char uuid[BLE_UUID_STR_LEN]{};
+            ble_uuid_to_str(&service->uuid.u, uuid);
+            ESP_LOGI(kTag, "analyzer service %s handles=%u-%u", uuid,
+                     service->start_handle, service->end_handle);
+            self->update_diagnostics([&](BleDiagnostics& value) {
+                if (value.service_count < kMaxBleServices) {
+                    std::snprintf(value.services[value.service_count++],
+                                  sizeof(value.services[0]), "%s", uuid);
+                }
+            });
+        }
+        return 0;
+    }
+
+    void discover_services(uint16_t handle)
+    {
+#if CONFIG_BT_NIMBLE_ROLE_CENTRAL
+        const int result = ble_gattc_disc_all_svcs(handle, service_discovered, this);
+        ESP_LOGI(kTag, "analyzer service discovery started; handle=%u rc=%d", handle, result);
+        if (result != 0) {
+            update_diagnostics([result](BleDiagnostics& value) { value.peer_error = result; });
+        }
+#endif
+    }
+
+    static int analyzer_gap_event(ble_gap_event* event, void* argument)
+    {
+        auto* self = static_cast<Impl*>(argument);
+        switch (event->type) {
+        case BLE_GAP_EVENT_DISC:
+            if (self->radio_enabled.load(std::memory_order_acquire) &&
+                self->is_scanning()) {
+                self->record_advertisement(event->disc);
+            }
+            break;
+        case BLE_GAP_EVENT_DISC_COMPLETE:
+            self->update_diagnostics([event](BleDiagnostics& value) {
+                value.scanning = false;
+                value.scan_error = event->disc_complete.reason;
+            });
+            break;
+        case BLE_GAP_EVENT_CONNECT:
+            self->update_diagnostics([event, self](BleDiagnostics& value) {
+                value.connecting = false;
+                // The stack reports an accepted application cancellation as
+                // EAPP. Preserve every unrelated connect failure verbatim.
+                value.peer_error = self->peer_disconnect_requested &&
+                                   event->connect.status == BLE_HS_EAPP
+                    ? 0 : event->connect.status;
+            });
+            self->peer_disconnect_requested = false;
+            if (event->connect.status == 0) {
+                if (self->stopping.load(std::memory_order_acquire) ||
+                    !self->radio_enabled.load(std::memory_order_acquire) ||
+                    !self->peer_connect_allowed ||
+                    self->peer_connection != BLE_HS_CONN_HANDLE_NONE) {
+                    ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                    break;
+                }
+                self->peer_connect_allowed = false;
+                self->peer_connection = event->connect.conn_handle;
+                const uint16_t mtu = ble_att_mtu(self->peer_connection);
+                self->update_diagnostics([mtu](BleDiagnostics& value) {
+                    value.peer_connected = true;
+                    value.peer_mtu = mtu;
+                });
+                // Primary service discovery works at the default MTU of 23.
+                // Do not gate read-only diagnostics on an optional exchange:
+                // an unresponsive MTU request can stall ATT for 30 seconds.
+                // A peer-initiated MTU exchange is reflected by GAP_MTU below.
+                self->discover_services(self->peer_connection);
+                ESP_LOGI(kTag, "analyzer peer connected");
+            } else {
+                self->peer_connect_allowed = false;
+            }
+            break;
+        case BLE_GAP_EVENT_DISCONNECT:
+            if (event->disconnect.conn.conn_handle == self->peer_connection) {
+                const bool expected = self->peer_disconnect_requested &&
+                    event->disconnect.reason == BLE_HS_HCI_ERR(BLE_ERR_CONN_TERM_LOCAL);
+                self->peer_disconnect_requested = false;
+                self->peer_connection = BLE_HS_CONN_HANDLE_NONE;
+                self->update_diagnostics([event, expected](BleDiagnostics& value) {
+                    value.peer_connected = false;
+                    value.connecting = false;
+                    value.peer_rssi = 0;
+                    value.peer_mtu = 23;
+                    // Timeout, MIC failure and remote termination remain
+                    // errors even if a disconnect was requested concurrently.
+                    value.peer_error = expected ? 0 : event->disconnect.reason;
+                });
+                ESP_LOGI(kTag, "analyzer peer disconnected: %d", event->disconnect.reason);
+            }
+            break;
+        case BLE_GAP_EVENT_ENC_CHANGE: {
+            if (self->enforce_store_health(event->enc_change.conn_handle)) break;
+            ble_gap_conn_desc description{};
+            const int result = ble_gap_conn_find(event->enc_change.conn_handle, &description);
+            if (result == 0 && description.role == BLE_GAP_ROLE_MASTER) {
+                ESP_LOGI(kTag, "analyzer security status=%d encrypted=%u bonded=%u key_bytes=%u",
+                         event->enc_change.status,
+                         static_cast<unsigned>(description.sec_state.encrypted),
+                         static_cast<unsigned>(description.sec_state.bonded),
+                         static_cast<unsigned>(description.sec_state.key_size));
+            }
+            break;
+        }
+        case BLE_GAP_EVENT_MTU:
+            if (event->mtu.conn_handle == self->peer_connection) {
+                self->update_diagnostics([event](BleDiagnostics& value) {
+                    value.peer_mtu = event->mtu.value;
+                });
+            }
+            break;
+        default:
+            break;
+        }
+        return 0;
+    }
+
+    static void process_host_event(ble_npl_event* event)
+    {
+        auto* self = static_cast<Impl*>(ble_npl_event_get_arg(event));
+        if (self->stopping.load(std::memory_order_acquire) ||
+            !self->host_synced.load(std::memory_order_acquire)) {
+            self->host_event_pending.store(false, std::memory_order_release);
+            return;
+        }
+        if (self->enforce_store_health()) {
+            xQueueReset(self->commands);
+            self->host_event_pending.store(false, std::memory_order_release);
+            return;
+        }
+        Command command{};
+        for (UBaseType_t index = 0; index < kCommandCapacity &&
+             xQueueReceive(self->commands, &command, 0) == pdTRUE; ++index) {
+            switch (command.kind) {
+            case CommandKind::scan: self->begin_scan(); break;
+            case CommandKind::connect: self->begin_connect(command); break;
+            case CommandKind::disconnect: self->end_peer_connection(); break;
+            case CommandKind::enable: self->change_enabled(command.enabled); break;
+            }
+        }
+        self->refresh_enabled();
+        if (self->peer_connection != BLE_HS_CONN_HANDLE_NONE) {
+            int8_t rssi = 0;
+            const int result = ble_gap_conn_rssi(self->peer_connection, &rssi);
+            if (result == 0) {
+                self->update_diagnostics([rssi](BleDiagnostics& value) {
+                    value.peer_rssi = rssi == 127 ? 0 : rssi;
+                });
+            }
+        }
+        self->host_event_pending.store(false, std::memory_order_release);
+    }
+
     void clear_response()
     {
         // Never expose the previous peer's command response to a new peer.
@@ -102,7 +603,15 @@ struct BleTransport::Impl final : AppTask {
 
     void advertise()
     {
-        if (stopping.load(std::memory_order_acquire)) {
+        if (stopping.load(std::memory_order_acquire) ||
+            !radio_enabled.load(std::memory_order_acquire) ||
+            connection != BLE_HS_CONN_HANDLE_NONE) {
+            return;
+        }
+        // Privacy preemption recovery and DISCONNECT may both request a
+        // restart. An existing advertisement already satisfies that request.
+        if (ble_gap_adv_active()) {
+            update_state([](BleSnapshot& value) { value.advertising = true; });
             return;
         }
         ble_hs_adv_fields fields{};
@@ -125,8 +634,9 @@ struct BleTransport::Impl final : AppTask {
             result = ble_gap_adv_start(address_type, nullptr, BLE_HS_FOREVER,
                                        &parameters, gap_event, this);
         }
-        update_state([result](BleSnapshot& value) { value.advertising = result == 0; });
-        if (result != 0) {
+        const bool advertising = ble_gap_adv_active() != 0;
+        update_state([advertising](BleSnapshot& value) { value.advertising = advertising; });
+        if (result != 0 && !(result == BLE_HS_EALREADY && advertising)) {
             ESP_LOGE(kTag, "advertising failed: %d", result);
         }
     }
@@ -137,6 +647,9 @@ struct BleTransport::Impl final : AppTask {
         if (self == nullptr || self->stopping.load(std::memory_order_acquire)) {
             return;
         }
+        // Dynamic privacy startup initializes the default store before sync.
+        // Install here so that initialization cannot overwrite the decorator.
+        ble_hs_cfg.store_write_cb = Impl::write_bond_store;
         int result = ble_hs_util_ensure_addr(0);
         if (result == 0) {
             result = ble_hs_id_infer_auto(0, &self->address_type);
@@ -145,6 +658,7 @@ struct BleTransport::Impl final : AppTask {
             ESP_LOGE(kTag, "address initialization failed: %d", result);
             return;
         }
+        self->host_synced.store(true, std::memory_order_release);
         self->advertise();
     }
 
@@ -154,7 +668,19 @@ struct BleTransport::Impl final : AppTask {
         if (self == nullptr) {
             return;
         }
+        self->host_synced.store(false, std::memory_order_release);
         self->connection = BLE_HS_CONN_HANDLE_NONE;
+        self->peer_connection = BLE_HS_CONN_HANDLE_NONE;
+        self->peer_connect_allowed = false;
+        self->peer_disconnect_requested = false;
+        self->update_diagnostics([reason](BleDiagnostics& value) {
+            value.scanning = false;
+            value.connecting = false;
+            value.peer_connected = false;
+            value.peer_mtu = 23;
+            value.peer_rssi = 0;
+            value.peer_error = reason;
+        });
         self->clear_response();
         self->update_state([](BleSnapshot& value) {
             value.advertising = false;
@@ -170,7 +696,8 @@ struct BleTransport::Impl final : AppTask {
 
     bool adopt_connection(uint16_t handle)
     {
-        if (stopping.load(std::memory_order_acquire)) {
+        if (stopping.load(std::memory_order_acquire) ||
+            !radio_enabled.load(std::memory_order_acquire) || bond_store.error() != 0) {
             return false;
         }
         if (connection == handle) {
@@ -180,7 +707,9 @@ struct BleTransport::Impl final : AppTask {
             return false;
         }
         ble_gap_conn_desc description{};
-        if (ble_gap_conn_find(handle, &description) != 0) {
+        if (ble_gap_conn_find(handle, &description) != 0 ||
+            description.role != BLE_GAP_ROLE_SLAVE) {
+            // Analyzer central links must never become the NUS server client.
             return false;
         }
         // IDF can restore encryption and CCCDs before its delayed CONNECT
@@ -242,6 +771,7 @@ struct BleTransport::Impl final : AppTask {
             break;
         case BLE_GAP_EVENT_SUBSCRIBE: {
             const auto& subscription = event->subscribe;
+            if (self->enforce_store_health(subscription.conn_handle)) break;
             if (subscription.attr_handle != self->tx_handle) {
                 break;
             }
@@ -262,6 +792,7 @@ struct BleTransport::Impl final : AppTask {
             break;
         }
         case BLE_GAP_EVENT_ENC_CHANGE: {
+            if (self->enforce_store_health(event->enc_change.conn_handle)) break;
             if (!self->adopt_connection(event->enc_change.conn_handle)) {
                 break;
             }
@@ -284,10 +815,26 @@ struct BleTransport::Impl final : AppTask {
             // Replace only this peer's stale record, and never downgrade SC,
             // key length, or an existing authenticated bond.
             const auto& repeat = event->repeat_pairing;
-            if (self->stopping.load(std::memory_order_acquire) ||
-                repeat.conn_handle != self->connection || !repeat.new_sc ||
-                repeat.new_key_size != 16 || !repeat.new_bonding ||
-                (repeat.cur_authenticated && !repeat.new_authenticated)) {
+            const bool stopping = self->stopping.load(std::memory_order_acquire);
+            const bool was_tracked = repeat.conn_handle == self->connection;
+            // SMP may request replacement before IDF delivers CONNECT. Apply
+            // the same live peripheral-role and single-peer validation used
+            // by early encryption/CCCD callbacks before checking bond policy.
+            const bool matches = self->adopt_connection(repeat.conn_handle);
+            const bool auth_downgrade = repeat.cur_authenticated && !repeat.new_authenticated;
+            if (matches && !was_tracked) {
+                ESP_LOGI(kTag, "adopted early pairing link; handle=%u",
+                         static_cast<unsigned>(repeat.conn_handle));
+            }
+            const char* ignored = stopping ? "transport stopping"
+                : !matches ? "handle is not the tracked peripheral link"
+                : !repeat.new_sc ? "Secure Connections required"
+                : repeat.new_key_size != 16 ? "128-bit key required"
+                : !repeat.new_bonding ? "bonding required"
+                : auth_downgrade ? "authenticated bond downgrade"
+                : nullptr;
+            if (ignored != nullptr) {
+                ESP_LOGW(kTag, "repeat pairing ignored: %s", ignored);
                 return BLE_GAP_REPEAT_PAIRING_IGNORE;
             }
             ble_gap_conn_desc description{};
@@ -312,6 +859,47 @@ struct BleTransport::Impl final : AppTask {
             break;
         }
         return 0;
+    }
+
+    static void report_bond_store(int object, int result, int rollback, bool update)
+    {
+        if (result == 0) {
+            ESP_LOGI(kTag, "bond store persisted existing update; object=%d", object);
+        } else {
+            ESP_LOGE(kTag, "bond store failed; object=%d rc=%d rollback=%d existing_update=%u",
+                     object, result, rollback, static_cast<unsigned>(update));
+        }
+    }
+
+    static int write_bond_store(int object, const ble_store_value* value)
+    {
+        Impl* self = active.load(std::memory_order_acquire);
+        return self != nullptr ? self->bond_store.write(object, value) : BLE_HS_ESTORE_FAIL;
+    }
+
+    bool enforce_store_health(uint16_t handle = BLE_HS_CONN_HANDLE_NONE)
+    {
+        const int error = bond_store.error();
+        if (error == 0) return false;
+        // IDF's SMP completion ignores store-write errors. Shut down radio
+        // activity outside its store callback / host lock, and reject GATT
+        // access immediately until the transport is fully reinitialized.
+        if (handle != BLE_HS_CONN_HANDLE_NONE &&
+            handle != connection && handle != peer_connection) {
+            const int result = ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (result != 0 && result != BLE_HS_ENOTCONN) {
+                ESP_LOGW(kTag, "untracked link shutdown failed: %d", result);
+            }
+        }
+        change_enabled(false);
+        clear_response();
+        update_state([](BleSnapshot& value) {
+            value.encrypted = false;
+            value.bonded = false;
+            value.subscribed = false;
+        });
+        update_diagnostics([error](BleDiagnostics& value) { value.peer_error = error; });
+        return true;
     }
 
     static int store_status(ble_store_status_event* event, void*)
@@ -396,6 +984,7 @@ struct BleTransport::Impl final : AppTask {
                       void* argument)
     {
         auto* self = static_cast<Impl*>(argument);
+        if (self->bond_store.error() != 0) return BLE_ATT_ERR_INSUFFICIENT_RES;
         if (!self->adopt_connection(handle)) {
             return BLE_ATT_ERR_UNLIKELY;
         }
@@ -451,7 +1040,24 @@ struct BleTransport::Impl final : AppTask {
     static std::atomic<Impl*> active;
     portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
     BleSnapshot state{};
+    BleDiagnostics analyzer{};
     std::atomic<bool> stopping{false};
+    std::atomic<bool> radio_enabled{true};
+    std::atomic<bool> host_synced{false};
+    detail::BleBondStore bond_store{ble_store_config_read, ble_store_config_write,
+                                    ble_store_config_delete, report_bond_store};
+    uint16_t peer_connection = BLE_HS_CONN_HANDLE_NONE;
+    bool peer_connect_allowed = false;
+    bool peer_disconnect_requested = false; // Host task owns connection intent.
+    ble_addr_t seen_addresses[kTrackedAddresses]{};
+    size_t seen_count = 0;
+    StaticQueue_t command_control{};
+    alignas(Command) uint8_t command_storage[kCommandCapacity * sizeof(Command)]{};
+    QueueHandle_t commands = nullptr;
+    ble_npl_event command_event{};
+    bool command_event_initialized = false;
+    std::atomic<bool> host_event_pending{false};
+    int64_t next_poll_us = 0;
     bool initialized = false;
     bool host_stop_requested = false;
     esp_err_t deinit_error = ESP_OK;
@@ -526,6 +1132,22 @@ esp_err_t BleTransport::start(const char* name, RequestHandler handler, void* co
     self->host_stop_requested = false;
     self->deinit_error = ESP_OK;
     self->stopping.store(false, std::memory_order_release);
+    self->radio_enabled.store(true, std::memory_order_release);
+    self->bond_store.reset();
+    self->host_synced.store(false, std::memory_order_release);
+    self->peer_connection = BLE_HS_CONN_HANDLE_NONE;
+    self->peer_connect_allowed = false;
+    self->peer_disconnect_requested = false;
+    self->seen_count = 0;
+    self->next_poll_us = 0;
+    xQueueReset(self->commands);
+    ble_npl_event_init(&self->command_event, Impl::process_host_event, self);
+    self->command_event_initialized = true;
+    self->host_event_pending.store(false, std::memory_order_release);
+    self->update_diagnostics([](BleDiagnostics& value) {
+        value = BleDiagnostics{};
+        value.enabled = true;
+    });
     self->handler = handler;
     self->handler_context = context;
     std::strcpy(self->name, name);
@@ -586,6 +1208,8 @@ esp_err_t BleTransport::stop()
         return ESP_OK;
     }
     self->stopping.store(true, std::memory_order_release);
+    self->host_synced.store(false, std::memory_order_release);
+    self->radio_enabled.store(false, std::memory_order_release);
     if (self->is_running() && !self->host_stop_requested) {
         // This signals the host, disconnects peers, stops advertising, and
         // wakes nimble_port_run. It must be called outside the host task.
@@ -600,6 +1224,24 @@ esp_err_t BleTransport::stop()
         return ESP_ERR_TIMEOUT;
     }
     // No application callback is running beyond this point.
+    if (self->command_event_initialized) {
+        ble_npl_eventq_remove(nimble_port_get_dflt_eventq(), &self->command_event);
+        ble_npl_event_deinit(&self->command_event);
+        self->command_event_initialized = false;
+    }
+    self->host_event_pending.store(false, std::memory_order_release);
+    xQueueReset(self->commands);
+    self->peer_connection = BLE_HS_CONN_HANDLE_NONE;
+    self->peer_connect_allowed = false;
+    self->peer_disconnect_requested = false;
+    self->update_diagnostics([](BleDiagnostics& value) {
+        value.enabled = false;
+        value.scanning = false;
+        value.connecting = false;
+        value.peer_connected = false;
+        value.peer_mtu = 23;
+        value.peer_rssi = 0;
+    });
     self->connection = BLE_HS_CONN_HANDLE_NONE;
     self->clear_response();
     self->update_state([](BleSnapshot& value) {
@@ -630,6 +1272,109 @@ esp_err_t BleTransport::stop()
     return ESP_OK;
 }
 
+
+esp_err_t BleTransport::request_scan()
+{
+#if CONFIG_BT_NIMBLE_ROLE_OBSERVER
+    Impl* self = impl_.load(std::memory_order_acquire);
+    if (self == nullptr) return ESP_ERR_INVALID_STATE;
+    Impl::Command command{};
+    command.kind = Impl::CommandKind::scan;
+    return self->enqueue(command);
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t BleTransport::connect_peer(const char* address, uint8_t address_type)
+{
+#if CONFIG_BT_NIMBLE_ROLE_CENTRAL
+    Impl* self = impl_.load(std::memory_order_acquire);
+    if (self == nullptr) return ESP_ERR_INVALID_STATE;
+    Impl::Command command{};
+    command.kind = Impl::CommandKind::connect;
+    if (!Impl::parse_address(address, address_type, command.address)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    char normalized[18]{};
+    Impl::format_address(command.address, normalized);
+    const BleDiagnostics observed = self->diagnostics();
+    if (!observed.enabled || observed.peer_connected || observed.connecting) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    bool found = false;
+    for (size_t index = 0; index < observed.count; ++index) {
+        const auto& device = observed.devices[index];
+        if (device.address_type == address_type &&
+            std::strcmp(device.address, normalized) == 0 && device.connectable) {
+            std::memcpy(command.peer_name, device.name, sizeof(command.peer_name));
+            found = true;
+            break;
+        }
+    }
+    // Connections require an actual connectable result selected from the
+    // latest scan. Never probe arbitrary addresses supplied by a remote client.
+    return found ? self->enqueue(command) : ESP_ERR_NOT_FOUND;
+#else
+    (void)address;
+    (void)address_type;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t BleTransport::disconnect_peer()
+{
+#if CONFIG_BT_NIMBLE_ROLE_CENTRAL
+    Impl* self = impl_.load(std::memory_order_acquire);
+    if (self == nullptr) return ESP_ERR_INVALID_STATE;
+    Impl::Command command{};
+    command.kind = Impl::CommandKind::disconnect;
+    return self->enqueue(command);
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t BleTransport::set_enabled(bool enabled)
+{
+    Impl* self = impl_.load(std::memory_order_acquire);
+    if (self == nullptr) return ESP_ERR_INVALID_STATE;
+    Impl::Command command{};
+    command.kind = Impl::CommandKind::enable;
+    command.enabled = enabled;
+    return self->enqueue(command);
+}
+
+void BleTransport::process()
+{
+    Impl* self = impl_.load(std::memory_order_acquire);
+    if (self == nullptr || !self->initialized ||
+        self->stopping.load(std::memory_order_acquire) ||
+        !self->host_synced.load(std::memory_order_acquire)) {
+        return;
+    }
+    const int64_t now = esp_timer_get_time();
+    if (uxQueueMessagesWaiting(self->commands) == 0 && now < self->next_poll_us) {
+        return;
+    }
+    bool expected = false;
+    if (!self->host_event_pending.compare_exchange_strong(expected, true,
+            std::memory_order_acq_rel)) {
+        return;
+    }
+    self->next_poll_us = now + 1000000;
+    // One producer and one outstanding event avoid races on NPL's queued bit.
+    // Its queue is sized to the event pool, so this reserved event has a slot.
+    // All GAP/GATT calls and mutable connection handles stay on the host task.
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &self->command_event);
+}
+
+BleDiagnostics BleTransport::diagnostics()
+{
+    Impl* self = impl_.load(std::memory_order_acquire);
+    return self == nullptr ? BleDiagnostics{} : self->diagnostics();
+}
+
 BleSnapshot BleTransport::snapshot()
 {
     Impl* self = impl_.load(std::memory_order_acquire);
@@ -652,6 +1397,14 @@ esp_err_t BleTransport::start(const char*, RequestHandler, void*)
 
 esp_err_t BleTransport::stop() { return ESP_OK; }
 BleSnapshot BleTransport::snapshot() { return {}; }
+
+esp_err_t BleTransport::request_scan() { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t BleTransport::connect_peer(const char*, uint8_t) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t BleTransport::disconnect_peer() { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t BleTransport::set_enabled(bool) { return ESP_ERR_NOT_SUPPORTED; }
+void BleTransport::process() {}
+BleDiagnostics BleTransport::diagnostics() { return {}; }
+
 
 } // namespace connectivity
 
