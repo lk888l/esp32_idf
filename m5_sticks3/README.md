@@ -1,4 +1,4 @@
-# M5-StickS3 Motion UI + Pocket Arcade + Radio Analyzer
+# M5-StickS3 Menu Firmware
 
 这是一个基于 ESP-IDF 5.5、LVGL 9 和 VQF 的 M5-StickS3 工程。工程沿用
 `esp_idf_template` 的 `AppModule` / `AppManager` / `AppTask` 分层方式，并参考
@@ -30,6 +30,19 @@
 游戏规则位于独立的 `mini_games` 组件，不依赖 LVGL 或 ESP-IDF，主机测试可直接
 覆盖物理边界、计时、护盾冷却和跳跃周期。需要姿态的游戏按需启动 BMI270，离开
 游戏后释放传感器；纯按键游戏不会额外开启 IMU。
+
+## 喇叭、麦克风与红外
+
+新增 **SPEAKER / MICROPHONE / INFRARED** 三张菜单卡片：I2S 全双工 DMA、
+16/24 位 PCM、8–48 kHz 采样、音量和增益控制、实时电平、PSRAM 录音回放、
+RMT 收发 DMA、NEC/扩展 NEC、原始信号学习回放及四个 NVS 存储槽。
+
+底层使用异步有界队列，支持可靠停止、错误恢复、功放与红外接收互斥及按需供电。
+音频 PCM source/sink 与红外 raw-frame API 可供应用复用。
+
+本轮没有连接设备，新增功能通过 Docker 编译及主机测试；实机验收尚未进行。
+详细操作、架构、限制和验收表见 [音频与红外说明](docs/audio-infrared.md)。
+在已加载 IDF 环境的容器工程目录运行 `bash tools/verify_peripherals.sh` 可复现无设备检查。
 
 ## 无线界面快速操作
 

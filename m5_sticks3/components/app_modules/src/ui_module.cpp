@@ -22,6 +22,7 @@
 #include "lvgl.h"
 #include "mini_games.hpp"
 #include "radio_ui.hpp"
+#include "peripheral_ui.hpp"
 #include "motion_runtime.hpp"
 #include "motion_state.hpp"
 #include "wave_generator.hpp"
@@ -57,6 +58,7 @@ enum class Page : uint8_t {
     arcade,
     game,
     radio,
+    peripheral,
 };
 
 using AnimExec = void (*)(void*, int32_t);
@@ -241,8 +243,9 @@ public:
             radio_smoke_timer_ = nullptr;
         }
 #endif
-        if (current_page_ == Page::radio && menu_screen_) lv_screen_load(menu_screen_);
+        if ((current_page_ == Page::radio || current_page_ == Page::peripheral) && menu_screen_) lv_screen_load(menu_screen_);
         radio_ui_.close();
+        peripheral_ui_.close();
         request_motion_enabled(false);
         auto& generator = wave::Generator::instance();
         if (generator.initialized() && generator.enabled()) {
@@ -283,6 +286,10 @@ public:
 
     void key1()
     {
+        if (current_page_ == Page::peripheral) {
+            peripheral_ui_.next();
+            return;
+        }
         if (current_page_ == Page::radio) {
             radio_ui_.next();
             return;
@@ -304,6 +311,10 @@ public:
 
     void key2_pressed()
     {
+        if (current_page_ == Page::peripheral) {
+            peripheral_ui_.press();
+            return;
+        }
         if (current_page_ == Page::radio) {
             radio_ui_.press();
             return;
@@ -325,6 +336,9 @@ public:
     void key2(bool long_press)
     {
         switch (current_page_) {
+        case Page::peripheral:
+            if (peripheral_ui_.select(long_press)) show_menu();
+            break;
         case Page::radio:
             if (radio_ui_.select(long_press)) show_menu();
             break;
@@ -540,6 +554,8 @@ private:
             update_game();
         } else if (current_page_ == Page::radio) {
             radio_ui_.update();
+        } else if (current_page_ == Page::peripheral) {
+            peripheral_ui_.update();
         }
     }
 
@@ -565,7 +581,7 @@ private:
         lv_obj_set_style_bg_opa(bloom_b, LV_OPA_10, 0);
         lv_obj_set_style_border_width(bloom_b, 0, 0);
 
-        lv_obj_t* brand = create_label(menu_screen_, "STICKS3 / MOTION", &lv_font_montserrat_12,
+        lv_obj_t* brand = create_label(menu_screen_, "STICKS3 / TOOLKIT", &lv_font_montserrat_12,
                                        lv_color_hex(0x8292AE));
         lv_obj_set_pos(brand, 8, 9);
 
@@ -590,11 +606,13 @@ private:
         start_loop_animation(selector_glow_, anim_border_opa, LV_OPA_20, LV_OPA_70,
                              1100, 1100);
 
-        constexpr std::array<const char*, 7> symbols = {
+        constexpr std::array<const char*, 10> symbols = {
             LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS,
-            LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH};
-        constexpr std::array<const char*, 7> titles = {
-            "MOTION", "AURA", "SYSTEM", "WAVE", "ARCADE", "WIFI", "BLE"};
+            LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH,
+            LV_SYMBOL_VOLUME_MAX, LV_SYMBOL_AUDIO, LV_SYMBOL_WIFI};
+        constexpr std::array<const char*, 10> titles = {
+            "MOTION", "AURA", "SYSTEM", "WAVE", "ARCADE", "WIFI", "BLE",
+            "SPEAKER", "MIC", "IR"};
         for (size_t index = 0; index < cards_.size(); ++index) {
             lv_obj_t* card = create_glass_panel(menu_screen_, 31, 148, 72, 72);
             cards_[index] = card;
@@ -1296,7 +1314,7 @@ private:
 
     void update_carousel(bool boot)
     {
-        constexpr std::array<const char*, 7> descriptions = {
+        constexpr std::array<const char*, 10> descriptions = {
             "On-demand 100 Hz VQF",
             "Layered aura animation",
             "Memory and uptime",
@@ -1304,6 +1322,9 @@ private:
             "Three pocket games",
             "WiFi scan / connect",
             "BLE scan / analyzer",
+            "I2S sound / playback",
+            "Mic levels / recorder",
+            "IR learn / remote",
         };
         lv_obj_move_foreground(cards_[selected_]);
         for (size_t index = 0; index < cards_.size(); ++index) {
@@ -1380,6 +1401,15 @@ private:
         case 6:
             show_radio(RadioUi::Kind::bluetooth);
             return;
+        case 7:
+            show_peripheral(PeripheralUi::Kind::speaker);
+            return;
+        case 8:
+            show_peripheral(PeripheralUi::Kind::microphone);
+            return;
+        case 9:
+            show_peripheral(PeripheralUi::Kind::infrared);
+            return;
         default:
             current_page_ = Page::arcade;
             target = arcade_screen_;
@@ -1389,6 +1419,16 @@ private:
         lv_screen_load_anim(target, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, kTransitionMs, 0, false);
     }
 
+    void show_peripheral(PeripheralUi::Kind kind)
+    {
+        lv_obj_t* target = peripheral_ui_.open(kind);
+        if (!target) {
+            ESP_LOGE(kTag, "insufficient memory for peripheral UI");
+            return;
+        }
+        current_page_ = Page::peripheral;
+        lv_screen_load(target);
+    }
     void show_radio(RadioUi::Kind kind)
     {
         lv_obj_t* target = radio_ui_.open(kind);
@@ -1404,6 +1444,12 @@ private:
 
     void show_menu()
     {
+        if (current_page_ == Page::peripheral) {
+            current_page_ = Page::menu;
+            lv_screen_load(menu_screen_);
+            peripheral_ui_.close();
+            return;
+        }
         if (current_page_ == Page::radio) {
             current_page_ = Page::menu;
             lv_screen_load(menu_screen_);
@@ -1847,8 +1893,9 @@ private:
     lv_obj_t* wave_screen_ = nullptr;
     lv_obj_t* arcade_screen_ = nullptr;
     lv_obj_t* game_screen_ = nullptr;
-    std::array<lv_obj_t*, 7> cards_{};
+    std::array<lv_obj_t*, 10> cards_{};
     RadioUi radio_ui_{};
+    PeripheralUi peripheral_ui_{};
     lv_obj_t* selector_glow_ = nullptr;
     lv_obj_t* menu_hint_ = nullptr;
 

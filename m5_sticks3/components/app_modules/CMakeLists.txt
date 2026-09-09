@@ -7,6 +7,8 @@ idf_component_register(
         "src/ui_module.cpp"
         "src/radio_ui.cpp"
         "src/wave_module.cpp"
+        "src/peripheral_module.cpp"
+        "src/peripheral_ui.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -22,6 +24,8 @@ idf_component_register(
         mini_games
         wave_generator
         connectivity
+        audio
+        infrared
 )
 
 if(M5_STICKS3_HW_SMOKE_TEST)

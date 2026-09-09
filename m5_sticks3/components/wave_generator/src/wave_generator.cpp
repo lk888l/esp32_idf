@@ -33,11 +33,8 @@ esp_err_t Generator::initialize()
     ESP_RETURN_ON_FALSE(bsp::Board::instance().initialized(), ESP_ERR_INVALID_STATE, kTag,
                         "board must be initialized first");
 
-    const esp_err_t power_result = bsp::Board::instance().enable_5v_output();
-    if (power_result != ESP_OK) {
-        ESP_LOGW(kTag, "external 5 V output unavailable: %s",
-                 esp_err_to_name(power_result));
-    }
+    // G4/G5 are 3.3 V logic outputs. Boost is owned on demand by the IR service;
+    // initializing a muted waveform must not energize Grove/HAT EXT_5V.
 
     const ledc_timer_config_t timer_config = {
         .speed_mode = kWaveMode,

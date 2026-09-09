@@ -31,6 +31,7 @@ extern "C" void app_main(void)
         !register_module(app_modules::create_motion_module()) ||
         !register_module(app_modules::create_wave_module()) ||
         !register_module(app_modules::create_connectivity_module()) ||
+        !register_module(app_modules::create_peripheral_module()) ||
         !register_module(app_modules::create_ui_module(button_events)) ||
         !register_module(app_modules::create_button_module(button_events))) {
         return;
