@@ -19,6 +19,25 @@ constexpr uint8_t kBmi270Address = 0x68;
 constexpr uint8_t kM5Pm1Address = 0x6E;
 constexpr uint8_t kEs8311Address = 0x18;
 
+// Match M5Unified's StickS3 voltage estimate. This is an instantaneous
+// voltage-derived indication, not a coulomb-counter state of charge.
+constexpr uint16_t kBatteryEmptyMv = 3300;
+constexpr uint16_t kBatteryFullMv = 4100;
+
+constexpr bool battery_voltage_valid(uint16_t millivolts)
+{
+    return millivolts >= 2500 && millivolts <= 4500;
+}
+
+constexpr uint8_t estimate_battery_percent(uint16_t millivolts)
+{
+    if (millivolts <= kBatteryEmptyMv) return 0;
+    if (millivolts >= kBatteryFullMv) return 100;
+    return static_cast<uint8_t>(
+        (static_cast<uint32_t>(millivolts - kBatteryEmptyMv) * 100U) /
+        (kBatteryFullMv - kBatteryEmptyMv));
+}
+
 constexpr gpio_num_t kKey1 = GPIO_NUM_11;
 constexpr gpio_num_t kKey2 = GPIO_NUM_12;
 
@@ -43,6 +62,10 @@ struct PowerStatus {
     uint16_t input_mv = 0;
     uint16_t external_mv = 0;
     bool boost_enabled = false;
+    bool charging = false;
+
+    bool battery_valid() const { return battery_voltage_valid(battery_mv); }
+    uint8_t battery_percent() const { return estimate_battery_percent(battery_mv); }
 
     bool externally_powered() const
     {

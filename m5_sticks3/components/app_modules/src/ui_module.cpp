@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "app_module.hpp"
+#include "bsp_board.hpp"
 #include "bsp_display.hpp"
 #include "button_event_bus.hpp"
 #include "connectivity_runtime.hpp"
@@ -35,6 +36,8 @@ constexpr uint32_t kUiUpdateMs = 16;
 constexpr uint32_t kTransitionMs = 460;
 constexpr uint32_t kCarouselDurationMs = 520;
 constexpr uint32_t kCarouselBootDurationMs = 800;
+constexpr uint32_t kPowerSampleMs = 1000;
+constexpr uint32_t kPowerInvalidDisplayThreshold = 3;
 constexpr TickType_t kLongPressTicks = pdMS_TO_TICKS(650);
 constexpr std::array<uint32_t, 5> kAccentHex = {
     0x67E8F9,
@@ -400,6 +403,50 @@ public:
         }
     }
 
+    void set_power_status(const bsp::PowerStatus& status, bool valid)
+    {
+        if (!menu_battery_label_ || !menu_battery_frame_ || !menu_battery_fill_ ||
+            !menu_battery_tip_ || !battery_detail_label_) {
+            return;
+        }
+
+        if (!valid) {
+            const lv_color_t unavailable = lv_color_hex(0x65758F);
+            lv_label_set_text(menu_battery_label_, "--%");
+            lv_obj_set_style_text_color(menu_battery_label_, unavailable, 0);
+            lv_obj_set_style_border_color(menu_battery_frame_, unavailable, 0);
+            lv_obj_set_style_bg_color(menu_battery_tip_, unavailable, 0);
+            lv_obj_add_flag(menu_battery_fill_, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(battery_detail_label_, "BAT  --%  -.--V");
+            lv_obj_set_style_text_color(battery_detail_label_, unavailable, 0);
+            return;
+        }
+
+        const unsigned percent = status.battery_percent();
+        const lv_color_t color = status.charging ? accent(3)
+                                 : percent <= 15 ? accent(2)
+                                 : percent <= 30 ? accent(4)
+                                                 : accent(0);
+        lv_label_set_text_fmt(menu_battery_label_, "%u%%", percent);
+        lv_obj_set_style_text_color(menu_battery_label_, color, 0);
+        lv_obj_set_style_border_color(menu_battery_frame_, color, 0);
+        lv_obj_set_style_bg_color(menu_battery_tip_, color, 0);
+        lv_obj_set_style_bg_color(menu_battery_fill_, color, 0);
+        lv_obj_set_width(menu_battery_fill_,
+                         std::max(1, static_cast<int>((18U * percent + 99U) / 100U)));
+        lv_obj_remove_flag(menu_battery_fill_, LV_OBJ_FLAG_HIDDEN);
+
+        const char* source = status.charging ? "CHG"
+                             : status.input_mv >= 4000 ? "USB"
+                             : status.externally_powered() ? "EXT"
+                                                           : "BAT";
+        const unsigned volts = status.battery_mv / 1000U;
+        const unsigned centivolts = (status.battery_mv % 1000U) / 10U;
+        lv_label_set_text_fmt(battery_detail_label_, "%s %3u%% %u.%02uV",
+                              source, percent, volts, centivolts);
+        lv_obj_set_style_text_color(battery_detail_label_, color, 0);
+    }
+
 private:
     static void timer_callback(lv_timer_t* timer)
     {
@@ -581,19 +628,44 @@ private:
         lv_obj_set_style_bg_opa(bloom_b, LV_OPA_10, 0);
         lv_obj_set_style_border_width(bloom_b, 0, 0);
 
-        lv_obj_t* brand = create_label(menu_screen_, "STICKS3 / TOOLKIT", &lv_font_montserrat_12,
+        lv_obj_t* brand = create_label(menu_screen_, "STICKS3", &lv_font_montserrat_12,
                                        lv_color_hex(0x8292AE));
         lv_obj_set_pos(brand, 8, 9);
 
-        lv_obj_t* dot = lv_obj_create(menu_screen_);
-        lv_obj_set_size(dot, 6, 6);
-        lv_obj_set_pos(dot, 120, 12);
-        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_color(dot, accent(0), 0);
-        lv_obj_set_style_border_width(dot, 0, 0);
-        lv_obj_set_style_shadow_color(dot, accent(0), 0);
-        lv_obj_set_style_shadow_opa(dot, LV_OPA_70, 0);
-        lv_obj_set_style_shadow_width(dot, 10, 0);
+        menu_battery_label_ = create_label(menu_screen_, "--%", &lv_font_montserrat_12,
+                                           lv_color_hex(0x65758F));
+        lv_obj_set_pos(menu_battery_label_, 66, 8);
+        lv_obj_set_width(menu_battery_label_, 31);
+        lv_obj_set_style_text_align(menu_battery_label_, LV_TEXT_ALIGN_RIGHT, 0);
+
+        menu_battery_frame_ = lv_obj_create(menu_screen_);
+        lv_obj_remove_flag(menu_battery_frame_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(menu_battery_frame_, 101, 9);
+        lv_obj_set_size(menu_battery_frame_, 25, 12);
+        lv_obj_set_style_radius(menu_battery_frame_, 3, 0);
+        lv_obj_set_style_bg_opa(menu_battery_frame_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(menu_battery_frame_, 1, 0);
+        lv_obj_set_style_border_color(menu_battery_frame_, lv_color_hex(0x65758F), 0);
+        lv_obj_set_style_pad_all(menu_battery_frame_, 0, 0);
+
+        menu_battery_fill_ = lv_obj_create(menu_battery_frame_);
+        lv_obj_remove_flag(menu_battery_fill_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(menu_battery_fill_, 2, 2);
+        lv_obj_set_size(menu_battery_fill_, 1, 6);
+        lv_obj_set_style_radius(menu_battery_fill_, 1, 0);
+        lv_obj_set_style_bg_color(menu_battery_fill_, lv_color_hex(0x65758F), 0);
+        lv_obj_set_style_bg_opa(menu_battery_fill_, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(menu_battery_fill_, 0, 0);
+        lv_obj_add_flag(menu_battery_fill_, LV_OBJ_FLAG_HIDDEN);
+
+        menu_battery_tip_ = lv_obj_create(menu_screen_);
+        lv_obj_remove_flag(menu_battery_tip_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(menu_battery_tip_, 127, 12);
+        lv_obj_set_size(menu_battery_tip_, 3, 6);
+        lv_obj_set_style_radius(menu_battery_tip_, 1, 0);
+        lv_obj_set_style_bg_color(menu_battery_tip_, lv_color_hex(0x65758F), 0);
+        lv_obj_set_style_bg_opa(menu_battery_tip_, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(menu_battery_tip_, 0, 0);
 
         selector_glow_ = lv_obj_create(menu_screen_);
         lv_obj_set_pos(selector_glow_, 31, 65);
@@ -816,15 +888,19 @@ private:
         lv_label_set_long_mode(network_label_, LV_LABEL_LONG_CLIP);
 
         lv_obj_t* telemetry = create_glass_panel(system_screen_, 8, 128, 119, 79);
-        heap_label_ = create_label(telemetry, "HEAP  -- KB", &lv_font_montserrat_14,
+        battery_detail_label_ = create_label(telemetry, "BAT  --%  -.--V",
+                                             &lv_font_montserrat_12,
+                                             lv_color_hex(0x65758F));
+        heap_label_ = create_label(telemetry, "HEAP  -- KB", &lv_font_montserrat_12,
                                    lv_color_hex(0xE2E8F0));
-        psram_label_ = create_label(telemetry, "PSRAM -- KB", &lv_font_montserrat_14,
+        psram_label_ = create_label(telemetry, "PSRAM -- KB", &lv_font_montserrat_12,
                                     lv_color_hex(0xE2E8F0));
-        uptime_label_ = create_label(telemetry, "UP    -- s", &lv_font_montserrat_14,
+        uptime_label_ = create_label(telemetry, "UP    -- s", &lv_font_montserrat_12,
                                      lv_color_hex(0xE2E8F0));
-        lv_obj_set_pos(heap_label_, 8, 9);
-        lv_obj_set_pos(psram_label_, 8, 31);
-        lv_obj_set_pos(uptime_label_, 8, 53);
+        lv_obj_set_pos(battery_detail_label_, 8, 5);
+        lv_obj_set_pos(heap_label_, 8, 23);
+        lv_obj_set_pos(psram_label_, 8, 41);
+        lv_obj_set_pos(uptime_label_, 8, 59);
 
         lv_obj_t* hint = create_label(system_screen_, "K1 BACK", &lv_font_montserrat_12,
                                       lv_color_hex(0x7D8BA4));
@@ -1898,6 +1974,10 @@ private:
     PeripheralUi peripheral_ui_{};
     lv_obj_t* selector_glow_ = nullptr;
     lv_obj_t* menu_hint_ = nullptr;
+    lv_obj_t* menu_battery_label_ = nullptr;
+    lv_obj_t* menu_battery_frame_ = nullptr;
+    lv_obj_t* menu_battery_fill_ = nullptr;
+    lv_obj_t* menu_battery_tip_ = nullptr;
 
     lv_obj_t* motion_status_label_ = nullptr;
     lv_obj_t* attitude_clip_ = nullptr;
@@ -1924,6 +2004,7 @@ private:
     size_t ambient_palette_ = 1;
 
     lv_obj_t* network_label_ = nullptr;
+    lv_obj_t* battery_detail_label_ = nullptr;
     lv_obj_t* heap_label_ = nullptr;
     lv_obj_t* psram_label_ = nullptr;
     lv_obj_t* uptime_label_ = nullptr;
@@ -2000,6 +2081,63 @@ public:
 
     std::string_view name() const override { return "ui"; }
 
+    void process() override
+    {
+        if (!controller_) return;
+
+        const TickType_t now = xTaskGetTickCount();
+        if (power_sampled_ &&
+            now - last_power_sample_at_ < pdMS_TO_TICKS(kPowerSampleMs)) {
+            return;
+        }
+        power_sampled_ = true;
+        last_power_sample_at_ = now;
+
+        bsp::PowerStatus status{};
+        const esp_err_t result = bsp::Board::instance().read_power_status(status);
+        const bool valid = result == ESP_OK && status.battery_valid();
+        if (valid) {
+            if (!power_filter_initialized_) {
+                filtered_battery_mv_ = status.battery_mv;
+                power_filter_initialized_ = true;
+                ESP_LOGI(kTag,
+                         "power monitor ready: battery=%u mV (%u%%), input=%u mV, "
+                         "external=%u mV, charging=%s",
+                         static_cast<unsigned>(status.battery_mv),
+                         static_cast<unsigned>(status.battery_percent()),
+                         static_cast<unsigned>(status.input_mv),
+                         static_cast<unsigned>(status.external_mv),
+                         status.charging ? "yes" : "no");
+            } else {
+                filtered_battery_mv_ = static_cast<uint16_t>(
+                    (static_cast<uint32_t>(filtered_battery_mv_) * 3U +
+                     status.battery_mv + 2U) /
+                    4U);
+            }
+            status.battery_mv = filtered_battery_mv_;
+            power_read_failures_ = 0;
+        } else {
+            ++power_read_failures_;
+            if (power_read_failures_ == 1 || power_read_failures_ % 30 == 0) {
+                if (result == ESP_OK) {
+                    ESP_LOGW(kTag, "invalid M5PM1 battery voltage: %u mV",
+                             status.battery_mv);
+                } else {
+                    ESP_LOGW(kTag, "M5PM1 power read failed: %s",
+                             esp_err_to_name(result));
+                }
+            }
+            if (power_read_failures_ < kPowerInvalidDisplayThreshold) return;
+        }
+
+        if (!lvgl_port_lock(100)) {
+            ESP_LOGW(kTag, "LVGL lock timeout while publishing power status");
+            return;
+        }
+        controller_->set_power_status(status, valid);
+        lvgl_port_unlock();
+    }
+
 private:
     static void button_event_callback(void* context, const app::ButtonEvent& event)
     {
@@ -2046,6 +2184,11 @@ private:
 
     bool on_initialize() override
     {
+        power_sampled_ = false;
+        power_filter_initialized_ = false;
+        power_read_failures_ = 0;
+        filtered_battery_mv_ = 0;
+
         const esp_err_t result = bsp::Display::instance().initialize();
         if (result != ESP_OK) {
             ESP_LOGE(kTag, "display initialization failed: %s", esp_err_to_name(result));
@@ -2102,7 +2245,12 @@ private:
     app::ButtonEventBus::Subscription button_subscription_{};
     std::unique_ptr<UiController> controller_;
     TickType_t key2_pressed_at_ = 0;
+    TickType_t last_power_sample_at_ = 0;
+    uint32_t power_read_failures_ = 0;
+    uint16_t filtered_battery_mv_ = 0;
     bool key2_pressed_ = false;
+    bool power_sampled_ = false;
+    bool power_filter_initialized_ = false;
 };
 
 } // namespace

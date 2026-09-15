@@ -16,7 +16,9 @@ constexpr uint8_t kBoost = 1U << 3;
 constexpr uint8_t kGpioFunction = 0x16;
 constexpr uint8_t kGpioMode = 0x10;
 constexpr uint8_t kGpioOutput = 0x11;
+constexpr uint8_t kGpioInput = 0x12;
 constexpr uint8_t kGpioDrive = 0x13;
+constexpr uint8_t kChargeStatusBit = 1U << 0;
 constexpr uint8_t kSpeakerBit = 1U << 3;
 
 // Static mutex storage lives as long as Board, including failed-init retries.
@@ -97,6 +99,14 @@ esp_err_t Board::initialize()
             vTaskDelay(pdMS_TO_TICKS(10));
             result = update_pm1_register(0x09, 0, 0x0F);
         }
+    }
+    if (result == ESP_OK) {
+        // StickS3 routes the charger's active-low CHG_STAT signal to PM1 GPIO0.
+        // Normalize retained PM1 state before sampling it.
+        result = update_pm1_register(kGpioFunction, 0, 0x03);
+    }
+    if (result == ESP_OK) {
+        result = update_pm1_register(kGpioMode, 0, kChargeStatusBit);
     }
     if (result == ESP_OK) result = set_speaker_locked(false);
     if (result != ESP_OK) {
@@ -195,6 +205,9 @@ esp_err_t Board::read_power_status_locked(PowerStatus& status)
 {
     uint8_t config = 0;
     ESP_RETURN_ON_ERROR(read_pm1_register(kPowerConfig, config), kTag, "read power config");
+    uint8_t gpio_input = 0;
+    ESP_RETURN_ON_ERROR(read_pm1_register(kGpioInput, gpio_input), kTag,
+                        "read charge status");
     const uint8_t reg = 0x22;
     std::array<uint8_t, 6> raw{};
     ESP_RETURN_ON_ERROR(i2c_master_transmit_receive(pm1_, &reg, 1, raw.data(),
@@ -205,6 +218,7 @@ esp_err_t Board::read_power_status_locked(PowerStatus& status)
     value.input_mv = static_cast<uint16_t>(raw[2] | (raw[3] << 8));
     value.external_mv = static_cast<uint16_t>(raw[4] | (raw[5] << 8));
     value.boost_enabled = (config & kBoost) != 0;
+    value.charging = (gpio_input & kChargeStatusBit) == 0 && value.externally_powered();
     status = value;
     return ESP_OK;
 }

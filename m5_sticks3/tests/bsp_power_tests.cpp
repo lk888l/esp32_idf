@@ -27,6 +27,7 @@ void reset(uint16_t external_mv = 0, bool boosted = false) {
  registers.fill(0);
  registers[0x06] = static_cast<uint8_t>(0x17 | (boosted ? boost : 0));
  registers[0x16] = 0xFF; // Every pin begins with a non-default function.
+ registers[0x12] = 0x01; // CHG_STAT inactive (active low).
  voltage(0x22, 3900); voltage(0x24, 0); voltage(0x26, external_mv);
  CHECK(board.initialize() == ESP_OK);
 }
@@ -68,12 +69,18 @@ esp_err_t i2c_master_transmit(i2c_master_dev_handle_t, const uint8_t* in, size_t
 
 int main() {
  auto& board = bsp::Board::instance();
+ CHECK(!bsp::battery_voltage_valid(0));
+ CHECK(bsp::battery_voltage_valid(3900));
+ CHECK(bsp::estimate_battery_percent(3200) == 0);
+ CHECK(bsp::estimate_battery_percent(3700) == 50);
+ CHECK(bsp::estimate_battery_percent(4200) == 100);
  reset();
  CHECK((registers[0x16] & 0xC0) == 0); // GPIO3's actual TWO-bit field.
- CHECK((registers[0x16] & 0x3F) == 0x3F);
+ CHECK((registers[0x16] & 0x03) == 0); // GPIO0 CHG_STAT normalized to GPIO.
+ CHECK((registers[0x16] & 0x3C) == 0x3C);
  CHECK((registers[0x11] & 8) == 0);
  CHECK(board.enable_display_power() == ESP_OK);
- CHECK(registers[0x16] == 0x0F);
+ CHECK(registers[0x16] == 0x0C);
  CHECK((registers[0x10] & 0x03) == 0); // No charge/input pins driven.
  CHECK((registers[0x11] & 4) != 0);
 
@@ -112,6 +119,10 @@ int main() {
  CHECK(board.read_power_status(power) == ESP_OK);
  CHECK(power.externally_powered());
  CHECK(power.battery_mv == 3900);
+ CHECK(!power.charging);
+ registers[0x12] = 0x00;
+ CHECK(board.read_power_status(power) == ESP_OK);
+ CHECK(power.charging);
  CHECK(board.release_ir_power() == ESP_OK);
  CHECK(!(registers[0x06] & boost));
 
