@@ -1,4 +1,4 @@
-# Keep LVGL's bounded 96 KiB TLSF arena while reserving internal RAM for
+# Keep LVGL's bounded 256 KiB TLSF arena while reserving internal RAM for
 # LCD DMA, task stacks and the Wi-Fi/BLE controller. No managed code is edited.
 # SPI completion touches LVGL objects: keep the BSP SPI interrupt non-IRAM
 # (intr_flags=0), so callbacks are masked while flash/NVS disables the cache.

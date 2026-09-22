@@ -31,7 +31,9 @@ CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_DEF_REFR_PERIOD=10
 
 CONFIG_LV_DRAW_SW_SHADOW_CACHE_SIZE=40
-CONFIG_LV_MEM_SIZE_KILOBYTES=96
+# Reserve headroom for overlapping ARGB card layers and TLSF fragmentation.
+# components/bsp/linker.lf keeps this bounded arena in PSRAM.
+CONFIG_LV_MEM_SIZE_KILOBYTES=256
 
 # Wi-Fi + BLE framework. Keep the pinned IDF 5.5 toolchain and enable coexistence.
 CONFIG_BT_ENABLED=y

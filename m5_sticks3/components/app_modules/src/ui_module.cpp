@@ -609,6 +609,11 @@ private:
 #ifdef M5_STICKS3_DAP_SMOKE_TEST
     void dap_test_status()
     {
+        lv_mem_monitor_t memory{};
+        lv_mem_monitor(&memory);
+        ESP_LOGI(kTag, "UI TEST page=%u card=%d busy=%u queued=%u lv_free=%u lv_largest=%u lv_peak=%u",
+                 unsigned(current_page_), selected_ + 1, carousel_busy_, carousel_step_queued_,
+                 unsigned(memory.free_size), unsigned(memory.free_biggest_size), unsigned(memory.max_used));
         const auto state = debug_probe::snapshot();
         const auto radio = connectivity::snapshot();
         ESP_LOGI(kTag, "DAP TEST mode=%u ready=%u connected=%u swd=%u clock=%lu limit=%lu packets=%lu errors=%lu error=%d gpio_out=%lu heap=%lu min_heap=%lu sta=%s ap=%s ble=%u enc=%u mtu=%u",
@@ -657,8 +662,15 @@ private:
         // The default USB Serial/JTAG console polls the hardware without a
         // blocking driver. IDF 5.5 O_NONBLOCK checks a driver ring buffer that
         // does not exist here, so keep the console's default polling mode.
-        const auto count = read(STDIN_FILENO, input, sizeof(input));
-        for (ssize_t index = 0; index < count; ++index) {
+        // Without the driver, each read may return only the prefetched byte.
+        // Drain a bounded batch so rapid commands cannot back up the USB FIFO.
+        size_t count = 0;
+        while (count < sizeof(input)) {
+            const auto received = read(STDIN_FILENO, input + count, sizeof(input) - count);
+            if (received <= 0) break;
+            count += static_cast<size_t>(received);
+        }
+        for (size_t index = 0; index < count; ++index) {
             const char ch = input[index];
             if (ch == '\n' || ch == '\r') {
                 dap_test_input_[dap_test_length_] = '\0';

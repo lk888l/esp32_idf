@@ -119,7 +119,7 @@ WSL 中出现 `/dev/ttyACM0` 后，重启以 `--privileged` 运行的开发容�
 - LVGL 数据与游戏呈现：16 ms 周期（最高约 60 Hz），从线程安全的最新快照读取
 - 电池状态：主任务每 1 秒读取 M5PM1 并做低通平滑，不在 LVGL 回调中阻塞 I2C
 - LVGL tick：5 ms；默认刷新周期：10 ms
-- 显存传输：2×60 行 RGB565 DMA 缓冲；LVGL 内存池 96 KiB，阴影缓存 40 px
+- 显存传输：2×60 行 RGB565 DMA 缓冲；PSRAM 中的 LVGL 内存池 256 KiB（预留卡片缩放、透明图层和内存碎片余量），阴影缓存 40 px
 - MOTION 页面只更新肉眼可见的数值/像素变化，设备静止时不做无效重绘
 - UI 过渡：约 430–460 ms 的 ease/overshoot 组合，持续动效使用较慢的往复节奏
 
@@ -160,6 +160,29 @@ idf.py -B build/hw-smoke -p /dev/ttyACM0 flash monitor
 ```
 
 验证完成后重新烧录 `build/codex-idf` 中的正式固件。
+
+菜单动画回归使用 `M5_STICKS3_DAP_SMOKE_TEST=ON` 的串口测试入口。它会循环全部
+13 张卡片、快速连按验证排队切换，并进入/返回 AURA 和 SYSTEM；默认固件不含此入口。
+在已加载 IDF 的容器中构建并烧录：
+
+```bash
+cp sdkconfig build/menu-smoke.sdkconfig
+idf.py -B build/menu-smoke -D SDKCONFIG="$PWD/build/menu-smoke.sdkconfig" \
+  -D M5_STICKS3_DAP_SMOKE_TEST=ON -D M5_STICKS3_HW_SMOKE_TEST=OFF \
+  -D M5_STICKS3_RADIO_SMOKE_TEST=OFF build
+idf.py -B build/menu-smoke -p /dev/ttyACM0 flash
+```
+
+在能访问串口且安装了 `pyserial` 的主机上执行
+`python tests/menu_navigation_test.py --port /dev/ttyACM0`；测试期间保持主菜单空闲，
+由脚本自动操作。脚本将界面失去响应、锁超时、看门狗和意外启用 SWD 判为失败。
+测试结束后重新烧录关闭所有 `M5_STICKS3_*_SMOKE_TEST` 选项的正式固件。
+
+原 96 KiB 图形池在卡片切换时可能因连续空间不足，卡在 LVGL 临时 ARGB 图层的
+分配重试中；现使用 PSRAM 中的 256 KiB 固定池。增加的是图形池预算，不占用 LCD
+DMA、Wi-Fi/BLE 控制器所需的内部 RAM。主机 UI 测试使用系统堆，不能代替此实机回归。
+2026-09-22 的 StickS3 实测通过 104 次普通切换、80 次快速切换请求及 AURA/SYSTEM
+往返，图形池分配峰值 94,780 字节；原 96 KiB 配置在连续切换时已复现卡死。
 
 ## Wi-Fi / BLE 通信框架
 
