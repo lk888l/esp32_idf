@@ -32,6 +32,17 @@
 覆盖物理边界、计时、护盾冷却和跳跃周期。需要姿态的游戏按需启动 BMI270，离开
 游戏后释放传感器；纯按键游戏不会额外开启 IMU。
 
+## CMSIS-DAP v2 / SWD 烧录与调试
+
+新增 **USB DAP / W-DAP / B-DAP** 菜单：进入页面才启用 USB、Wi-Fi TCP 或 BLE 调试传输，
+退出释放 SWD 引脚。页面显示速率上限、链路、包数、错误和接线；默认 G6=SWCLK、G7=SWDIO、
+G8=开漏 NRST，目标板自行供电并共地，仅支持 3.3 V 信号。
+
+通过 OpenOCD 烧录/调试 STM32；BLE 使用附带的电脑桥接脚本。
+这是 CMSIS-DAP 协议，IDE 中应选择 CMSIS-DAP/OpenOCD。
+接线、使用命令、USB 下载口恢复、构建和验证边界见 [调试器说明](docs/debug-probe.md)。
+本次 Docker 编译、主机协议和界面测试已通过；真实目标板烧录/调试仍需实机验收。
+
 ## 喇叭、麦克风与红外
 
 新增 **SPEAKER / MICROPHONE / INFRARED** 三张菜单卡片：I2S 全双工 DMA、
@@ -83,7 +94,7 @@ KEY2 查看详情；Wi-Fi 可输入密码连接，BLE 可连接可连接的广�
 
 ```bash
 docker exec -it -w /workspace/esp32_idf/m5_sticks3 esp-dev bash
-source /opt/esp/idf/export.sh
+source /opt/esp-idf/export.sh
 idf.py -B build/codex-idf build
 idf.py -B build/codex-idf -p /dev/ttyACM0 flash monitor
 ```

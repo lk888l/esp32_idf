@@ -1,4 +1,5 @@
 #include "ble_transport.hpp"
+#include "debug_probe.hpp"
 
 #include "sdkconfig.h"
 
@@ -52,6 +53,16 @@ constexpr ble_uuid128_t kTxUuid = BLE_UUID128_INIT(
     0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
     0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e);
 
+constexpr ble_uuid128_t kDapServiceUuid = BLE_UUID128_INIT(
+    0x73, 0x33, 0x44, 0x41, 0x50, 0x00, 0x91, 0xa7,
+    0x8e, 0x4c, 0x3a, 0x67, 0x01, 0x00, 0x5d, 0x8d);
+constexpr ble_uuid128_t kDapRxUuid = BLE_UUID128_INIT(
+    0x73, 0x33, 0x44, 0x41, 0x50, 0x00, 0x91, 0xa7,
+    0x8e, 0x4c, 0x3a, 0x67, 0x02, 0x00, 0x5d, 0x8d);
+constexpr ble_uuid128_t kDapTxUuid = BLE_UUID128_INIT(
+    0x73, 0x33, 0x44, 0x41, 0x50, 0x00, 0x91, 0xa7,
+    0x8e, 0x4c, 0x3a, 0x67, 0x03, 0x00, 0x5d, 0x8d);
+
 } // namespace
 
 struct BleTransport::Impl final : AppTask {
@@ -76,6 +87,19 @@ struct BleTransport::Impl final : AppTask {
         services[0].type = BLE_GATT_SVC_TYPE_PRIMARY;
         services[0].uuid = &kServiceUuid.u;
         services[0].characteristics = characteristics;
+        dap_characteristics[0].uuid = &kDapRxUuid.u;
+        dap_characteristics[0].access_cb = access;
+        dap_characteristics[0].arg = this;
+        dap_characteristics[0].flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC;
+        dap_characteristics[0].min_key_size = 16;
+        dap_characteristics[1].uuid = &kDapTxUuid.u;
+        dap_characteristics[1].access_cb = access;
+        dap_characteristics[1].arg = this;
+        dap_characteristics[1].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC;
+        dap_characteristics[1].min_key_size = 16;
+        services[1].type = BLE_GATT_SVC_TYPE_PRIMARY;
+        services[1].uuid = &kDapServiceUuid.u;
+        services[1].characteristics = dap_characteristics;
         clear_response();
         commands = xQueueCreateStatic(kCommandCapacity, sizeof(Command),
                                       command_storage, &command_control);
@@ -751,6 +775,7 @@ struct BleTransport::Impl final : AppTask {
             if (event->disconnect.conn.conn_handle != self->connection) {
                 break;
             }
+            debug_probe::ble_disconnect(self->connection);
             self->connection = BLE_HS_CONN_HANDLE_NONE;
             self->clear_response();
             self->update_state([](BleSnapshot& value) {
@@ -1001,6 +1026,25 @@ struct BleTransport::Impl final : AppTask {
             value.encrypted = encrypted;
             value.bonded = bonded;
         });
+        const bool dap_rx = ble_uuid_cmp(context->chr->uuid, &kDapRxUuid.u) == 0;
+        const bool dap_tx = ble_uuid_cmp(context->chr->uuid, &kDapTxUuid.u) == 0;
+        if (dap_rx || dap_tx) {
+            if (!encrypted || connection_state.sec_state.key_size != 16)
+                return BLE_ATT_ERR_INSUFFICIENT_ENC;
+            uint8_t bytes[debug_probe::kPacketSize + 5]{};
+            if (dap_tx && context->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+                const size_t size = debug_probe::ble_read(handle, bytes, sizeof(bytes));
+                if (!size) return BLE_ATT_ERR_UNLIKELY;
+                return os_mbuf_append(context->om, bytes, size) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+            }
+            const size_t size = OS_MBUF_PKTLEN(context->om);
+            if (!dap_rx || context->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
+                return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
+            if (size < 5 || size > debug_probe::kPacketSize + 4 || size > ble_att_mtu(handle) - 3U ||
+                os_mbuf_copydata(context->om, 0, size, bytes) != 0)
+                return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+            return debug_probe::ble_write(handle, bytes, size) ? 0 : BLE_ATT_ERR_UNLIKELY;
+        }
         if (context->op == BLE_GATT_ACCESS_OP_READ_CHR &&
             ble_uuid_cmp(context->chr->uuid, &kTxUuid.u) == 0) {
             // NimBLE applies Read Blob offsets to this complete value. The
@@ -1070,7 +1114,8 @@ struct BleTransport::Impl final : AppTask {
     char response[kResponseBytes + 1]{};
     size_t response_length = 0;
     ble_gatt_chr_def characteristics[3]{};
-    ble_gatt_svc_def services[2]{};
+    ble_gatt_chr_def dap_characteristics[3]{};
+    ble_gatt_svc_def services[3]{};
 };
 
 std::atomic<BleTransport::Impl*> BleTransport::Impl::active{nullptr};

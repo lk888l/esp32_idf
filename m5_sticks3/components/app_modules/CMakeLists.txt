@@ -9,6 +9,7 @@ idf_component_register(
         "src/wave_module.cpp"
         "src/peripheral_module.cpp"
         "src/peripheral_ui.cpp"
+        "src/debug_ui.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -26,6 +27,7 @@ idf_component_register(
         connectivity
         audio
         infrared
+        debug_probe
 )
 
 if(M5_STICKS3_HW_SMOKE_TEST)
@@ -37,4 +39,12 @@ if(M5_STICKS3_RADIO_SMOKE_TEST)
         message(FATAL_ERROR "Choose one independent UI smoke test at a time")
     endif()
     target_compile_definitions(${COMPONENT_LIB} PRIVATE M5_STICKS3_RADIO_SMOKE_TEST=1)
+endif()
+
+# Explicit opt-in hardware harness; never present in normal firmware.
+if(M5_STICKS3_DAP_SMOKE_TEST)
+    if(M5_STICKS3_HW_SMOKE_TEST OR M5_STICKS3_RADIO_SMOKE_TEST)
+        message(FATAL_ERROR "Choose one independent UI smoke test at a time")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE M5_STICKS3_DAP_SMOKE_TEST=1)
 endif()

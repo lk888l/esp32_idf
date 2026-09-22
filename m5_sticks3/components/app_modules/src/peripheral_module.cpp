@@ -5,6 +5,7 @@
 
 #include "app_module.hpp"
 #include "audio_service.hpp"
+#include "debug_probe.hpp"
 #include "infrared_service.hpp"
 #include "esp_log.h"
 
@@ -22,6 +23,7 @@ private:
     {
         esp_err_t result = audio::Service::instance().initialize();
         if (result == ESP_OK) result = infrared::Service::instance().initialize();
+        if (result == ESP_OK) result = debug_probe::initialize();
         if (result != ESP_OK) {
             ESP_LOGE("peripherals", "service startup failed: %s", esp_err_to_name(result));
         }
@@ -30,15 +32,16 @@ private:
 
     bool on_deinitialize() override
     {
-        // Both cleanup paths run even if one fails. AppModule retains failed
+        // All cleanup paths run even if one fails. AppModule retains failed
         // cleanup state so live tasks and their storage cannot be destroyed.
+        const esp_err_t probe_result = debug_probe::deinitialize();
         const esp_err_t infrared_result = infrared::Service::instance().deinitialize();
         const esp_err_t audio_result = audio::Service::instance().deinitialize();
-        if (infrared_result != ESP_OK || audio_result != ESP_OK) {
-            ESP_LOGE("peripherals", "cleanup pending: IR=%s audio=%s",
-                     esp_err_to_name(infrared_result), esp_err_to_name(audio_result));
+        if (probe_result != ESP_OK || infrared_result != ESP_OK || audio_result != ESP_OK) {
+            ESP_LOGE("peripherals", "cleanup pending: DAP=%s IR=%s audio=%s",
+                     esp_err_to_name(probe_result), esp_err_to_name(infrared_result), esp_err_to_name(audio_result));
         }
-        return infrared_result == ESP_OK && audio_result == ESP_OK;
+        return probe_result == ESP_OK && infrared_result == ESP_OK && audio_result == ESP_OK;
     }
 };
 

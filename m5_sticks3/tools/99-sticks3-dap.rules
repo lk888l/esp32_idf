@@ -1,0 +1,2 @@
+# Optional host udev rule for the development CMSIS-DAP USB identity.
+SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ATTR{idProduct}=="4004", MODE="0660", TAG+="uaccess"

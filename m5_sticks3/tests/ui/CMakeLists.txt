@@ -13,3 +13,11 @@ target_include_directories(peripheral_ui_tests PRIVATE ../ui_stubs ../../compone
 target_link_libraries(peripheral_ui_tests PRIVATE lvgl m)
 enable_testing()
 add_test(NAME peripheral_ui_tests COMMAND peripheral_ui_tests)
+
+add_executable(debug_ui_tests ../debug_ui_tests.cpp ../../components/app_modules/src/debug_ui.cpp)
+target_compile_features(debug_ui_tests PRIVATE cxx_std_20)
+target_compile_options(debug_ui_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(debug_ui_tests PRIVATE ../ui_stubs ../../components/debug_probe/include
+    ../../components/connectivity/include ../../components/app_modules/src)
+target_link_libraries(debug_ui_tests PRIVATE lvgl m)
+add_test(NAME debug_ui_tests COMMAND debug_ui_tests)

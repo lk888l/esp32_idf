@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(m5_sticks3_host_tests LANGUAGES CXX)
+project(m5_sticks3_host_tests LANGUAGES C CXX)
 
 add_executable(app_host_tests
     host_tests.cpp
@@ -71,3 +71,25 @@ if(M5_HOST_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_link_options(${test_target} PRIVATE -fsanitize=address,undefined)
     endforeach()
 endif()
+
+add_executable(dap_protocol_tests dap_protocol_tests.cpp)
+target_compile_features(dap_protocol_tests PRIVATE cxx_std_20)
+target_compile_options(dap_protocol_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(dap_protocol_tests PRIVATE ../components/debug_probe/include)
+add_test(NAME dap_protocol_tests COMMAND dap_protocol_tests)
+
+add_executable(dap_engine_tests dap_engine_tests.cpp
+    ../components/debug_probe/vendor/DAP.c ../components/debug_probe/vendor/SW_DP.c)
+target_compile_features(dap_engine_tests PRIVATE cxx_std_20)
+target_compile_options(dap_engine_tests PRIVATE -Wall -Wextra -Wno-unused-variable)
+target_include_directories(dap_engine_tests PRIVATE dap_stubs ../components/debug_probe/include
+    ../components/debug_probe/vendor ../components/debug_probe/src)
+add_test(NAME dap_engine_tests COMMAND dap_engine_tests)
+if(M5_HOST_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(test_target dap_protocol_tests dap_engine_tests)
+        target_compile_options(${test_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${test_target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME dap_bridge_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/dap_bridge_tests.py)

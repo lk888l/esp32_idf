@@ -5,3 +5,6 @@ sdkconfig.old
 # Local Python clients/tests
 __pycache__/
 *.py[cod]
+
+# Optional local BLE bridge environment
+.venv-dap/

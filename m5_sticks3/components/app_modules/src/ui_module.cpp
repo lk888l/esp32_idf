@@ -24,9 +24,15 @@
 #include "mini_games.hpp"
 #include "radio_ui.hpp"
 #include "peripheral_ui.hpp"
+#include "debug_ui.hpp"
 #include "motion_runtime.hpp"
 #include "motion_state.hpp"
 #include "wave_generator.hpp"
+#ifdef M5_STICKS3_DAP_SMOKE_TEST
+#include <cstring>
+#include <unistd.h>
+#include "soc/gpio_struct.h"
+#endif
 
 namespace app_modules {
 namespace {
@@ -62,6 +68,7 @@ enum class Page : uint8_t {
     game,
     radio,
     peripheral,
+    debug,
 };
 
 using AnimExec = void (*)(void*, int32_t);
@@ -229,6 +236,9 @@ public:
             destroy();
             return false;
         }
+#ifdef M5_STICKS3_DAP_SMOKE_TEST
+        ESP_LOGI(kTag, "DAP test console ready (test build only)");
+#endif
 #ifdef M5_STICKS3_HW_SMOKE_TEST
         start_hardware_smoke_test();
 #endif
@@ -246,9 +256,10 @@ public:
             radio_smoke_timer_ = nullptr;
         }
 #endif
-        if ((current_page_ == Page::radio || current_page_ == Page::peripheral) && menu_screen_) lv_screen_load(menu_screen_);
+        if ((current_page_ == Page::radio || current_page_ == Page::peripheral || current_page_ == Page::debug) && menu_screen_) lv_screen_load(menu_screen_);
         radio_ui_.close();
         peripheral_ui_.close();
+        debug_ui_.close();
         request_motion_enabled(false);
         auto& generator = wave::Generator::instance();
         if (generator.initialized() && generator.enabled()) {
@@ -289,6 +300,7 @@ public:
 
     void key1()
     {
+        if (current_page_ == Page::debug) { debug_ui_.next(); return; }
         if (current_page_ == Page::peripheral) {
             peripheral_ui_.next();
             return;
@@ -339,6 +351,9 @@ public:
     void key2(bool long_press)
     {
         switch (current_page_) {
+        case Page::debug:
+            if (debug_ui_.select(long_press)) show_menu();
+            break;
         case Page::peripheral:
             if (peripheral_ui_.select(long_press)) show_menu();
             break;
@@ -591,8 +606,78 @@ private:
     }
 #endif
 
+#ifdef M5_STICKS3_DAP_SMOKE_TEST
+    void dap_test_status()
+    {
+        const auto state = debug_probe::snapshot();
+        const auto radio = connectivity::snapshot();
+        ESP_LOGI(kTag, "DAP TEST mode=%u ready=%u connected=%u swd=%u clock=%lu limit=%lu packets=%lu errors=%lu error=%d gpio_out=%lu heap=%lu min_heap=%lu sta=%s ap=%s ble=%u enc=%u mtu=%u",
+                 unsigned(state.mode), state.ready, state.connected, state.swd,
+                 (unsigned long)state.clock_hz, (unsigned long)state.limit_hz,
+                 (unsigned long)state.packets, (unsigned long)state.errors, int(state.error),
+                 (unsigned long)(GPIO.enable & ((1U << 6) | (1U << 7) | (1U << 8))),
+                 (unsigned long)esp_get_free_heap_size(), (unsigned long)esp_get_minimum_free_heap_size(),
+                 radio.wifi.address, radio.wifi.ap_address, radio.ble.enabled,
+                 radio.ble.encrypted, radio.ble.mtu);
+    }
+
+    void dap_test_command(const char* command)
+    {
+        if (std::strncmp(command, "dap ", 4)) return;
+        command += 4;
+        debug_probe::Mode mode = debug_probe::Mode::off;
+        if (!std::strcmp(command, "usb")) mode = debug_probe::Mode::usb;
+        if (!std::strcmp(command, "wifi")) mode = debug_probe::Mode::wifi;
+        if (!std::strcmp(command, "ble")) mode = debug_probe::Mode::ble;
+        if (mode != debug_probe::Mode::off) {
+            show_menu();
+            show_debug(mode);
+            // Recover native USB without physical buttons even if enumeration fails.
+            dap_test_deadline_ = esp_timer_get_time() + (mode == debug_probe::Mode::usb ? 60000000LL : 180000000LL);
+        } else if (!std::strcmp(command, "off") || !std::strcmp(command, "back")) {
+            if (current_page_ == Page::debug) key2(true);
+            dap_test_deadline_ = 0;
+        } else if (!std::strcmp(command, "next")) {
+            key1();
+        } else if (!std::strcmp(command, "select")) {
+            key2(false);
+        } else if (std::strcmp(command, "status")) {
+            ESP_LOGW(kTag, "DAP test: unknown command");
+        }
+        dap_test_status();
+    }
+
+    void dap_test_poll()
+    {
+        if (dap_test_deadline_ && esp_timer_get_time() >= dap_test_deadline_) {
+            show_menu();
+            dap_test_deadline_ = 0;
+        }
+        char input[32];
+        // The default USB Serial/JTAG console polls the hardware without a
+        // blocking driver. IDF 5.5 O_NONBLOCK checks a driver ring buffer that
+        // does not exist here, so keep the console's default polling mode.
+        const auto count = read(STDIN_FILENO, input, sizeof(input));
+        for (ssize_t index = 0; index < count; ++index) {
+            const char ch = input[index];
+            if (ch == '\n' || ch == '\r') {
+                dap_test_input_[dap_test_length_] = '\0';
+                if (dap_test_length_) dap_test_command(dap_test_input_);
+                dap_test_length_ = 0;
+            } else if (dap_test_length_ < sizeof(dap_test_input_) - 1) {
+                dap_test_input_[dap_test_length_++] = ch;
+            } else {
+                dap_test_length_ = 0;
+            }
+        }
+    }
+#endif
+
     void update()
     {
+#ifdef M5_STICKS3_DAP_SMOKE_TEST
+        dap_test_poll();
+#endif
         if (current_page_ == Page::motion) {
             update_motion();
         } else if (current_page_ == Page::system) {
@@ -601,6 +686,8 @@ private:
             update_game();
         } else if (current_page_ == Page::radio) {
             radio_ui_.update();
+        } else if (current_page_ == Page::debug) {
+            debug_ui_.update();
         } else if (current_page_ == Page::peripheral) {
             peripheral_ui_.update();
         }
@@ -678,13 +765,14 @@ private:
         start_loop_animation(selector_glow_, anim_border_opa, LV_OPA_20, LV_OPA_70,
                              1100, 1100);
 
-        constexpr std::array<const char*, 10> symbols = {
+        constexpr std::array<const char*, 13> symbols = {
             LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS,
             LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH,
-            LV_SYMBOL_VOLUME_MAX, LV_SYMBOL_AUDIO, LV_SYMBOL_WIFI};
-        constexpr std::array<const char*, 10> titles = {
+            LV_SYMBOL_VOLUME_MAX, LV_SYMBOL_AUDIO, LV_SYMBOL_WIFI,
+            LV_SYMBOL_USB, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH};
+        constexpr std::array<const char*, 13> titles = {
             "MOTION", "AURA", "SYSTEM", "WAVE", "ARCADE", "WIFI", "BLE",
-            "SPEAKER", "MIC", "IR"};
+            "SPEAKER", "MIC", "IR", "USB DAP", "W-DAP", "B-DAP"};
         for (size_t index = 0; index < cards_.size(); ++index) {
             lv_obj_t* card = create_glass_panel(menu_screen_, 31, 148, 72, 72);
             cards_[index] = card;
@@ -1390,7 +1478,7 @@ private:
 
     void update_carousel(bool boot)
     {
-        constexpr std::array<const char*, 10> descriptions = {
+        constexpr std::array<const char*, 13> descriptions = {
             "On-demand 100 Hz VQF",
             "Layered aura animation",
             "Memory and uptime",
@@ -1401,6 +1489,9 @@ private:
             "I2S sound / playback",
             "Mic levels / recorder",
             "IR learn / remote",
+            "USB CMSIS-DAP v2",
+            "WiFi SWD debugger",
+            "BLE SWD debugger",
         };
         lv_obj_move_foreground(cards_[selected_]);
         for (size_t index = 0; index < cards_.size(); ++index) {
@@ -1486,6 +1577,9 @@ private:
         case 9:
             show_peripheral(PeripheralUi::Kind::infrared);
             return;
+        case 10: show_debug(debug_probe::Mode::usb); return;
+        case 11: show_debug(debug_probe::Mode::wifi); return;
+        case 12: show_debug(debug_probe::Mode::ble); return;
         default:
             current_page_ = Page::arcade;
             target = arcade_screen_;
@@ -1493,6 +1587,14 @@ private:
             break;
         }
         lv_screen_load_anim(target, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, kTransitionMs, 0, false);
+    }
+
+    void show_debug(debug_probe::Mode mode)
+    {
+        lv_obj_t* target = debug_ui_.open(mode);
+        if (!target) return;
+        current_page_ = Page::debug;
+        lv_screen_load(target);
     }
 
     void show_peripheral(PeripheralUi::Kind kind)
@@ -1520,6 +1622,12 @@ private:
 
     void show_menu()
     {
+        if (current_page_ == Page::debug) {
+            current_page_ = Page::menu;
+            lv_screen_load(menu_screen_);
+            debug_ui_.close();
+            return;
+        }
         if (current_page_ == Page::peripheral) {
             current_page_ = Page::menu;
             lv_screen_load(menu_screen_);
@@ -1969,9 +2077,10 @@ private:
     lv_obj_t* wave_screen_ = nullptr;
     lv_obj_t* arcade_screen_ = nullptr;
     lv_obj_t* game_screen_ = nullptr;
-    std::array<lv_obj_t*, 10> cards_{};
+    std::array<lv_obj_t*, 13> cards_{};
     RadioUi radio_ui_{};
     PeripheralUi peripheral_ui_{};
+    DebugUi debug_ui_{};
     lv_obj_t* selector_glow_ = nullptr;
     lv_obj_t* menu_hint_ = nullptr;
     lv_obj_t* menu_battery_label_ = nullptr;
@@ -2055,6 +2164,11 @@ private:
 #ifdef M5_STICKS3_RADIO_SMOKE_TEST
     lv_timer_t* radio_smoke_timer_ = nullptr;
     uint8_t radio_smoke_step_ = 0;
+#endif
+#ifdef M5_STICKS3_DAP_SMOKE_TEST
+    char dap_test_input_[48]{};
+    size_t dap_test_length_ = 0;
+    int64_t dap_test_deadline_ = 0;
 #endif
     Page current_page_ = Page::menu;
     int selected_ = 0;

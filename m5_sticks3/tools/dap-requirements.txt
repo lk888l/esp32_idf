@@ -1,0 +1,2 @@
+# Python 3.11+; only the BLE scan/bridge needs this dependency.
+bleak>=1.0,<4
