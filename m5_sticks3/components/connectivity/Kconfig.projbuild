@@ -1,4 +1,12 @@
 menu "M5-StickS3 connectivity"
+    config M5_CONNECTIVITY_CONSOLE_ENABLED
+        bool "Enable local radio commands over USB Serial/JTAG console"
+        depends on ESP_CONSOLE_USB_SERIAL_JTAG
+        default y
+        help
+            Local CLI and API v1 JSON line input. Physical USB requests do not
+            require the radio API token. No command echo or password history.
+            Paused while USB CMSIS-DAP owns the internal PHY.
     config M5_CONNECTIVITY_WIFI_ENABLED
         bool "Enable Wi-Fi AP/STA and local HTTP API"
         default y

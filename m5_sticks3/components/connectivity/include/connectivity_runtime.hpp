@@ -3,6 +3,8 @@
 #include "connectivity_policy.hpp"
 #include "wifi_diagnostics.hpp"
 #include "ble_diagnostics.hpp"
+#include "radio_memory.hpp"
+#include "command_history.hpp"
 #include "esp_err.h"
 namespace connectivity {
 struct Snapshot {
@@ -17,18 +19,24 @@ struct Snapshot {
 };
 enum class ControlAction : uint8_t {
     wifi_scan, wifi_connect, wifi_reconnect, wifi_disconnect,
-    wifi_enable, wifi_disable, wifi_clear, ble_scan, ble_connect,
-    ble_disconnect, ble_enable, ble_disable
+    wifi_enable, wifi_disable, wifi_clear, wifi_configure,
+    wifi_remember, wifi_forget, wifi_use,
+    ble_scan, ble_connect, ble_disconnect, ble_enable, ble_disable,
+    ble_remember, ble_forget, ble_use, ble_reconnect, ble_unpair
 };
 struct ControlRequest {
     ControlAction action = ControlAction::wifi_scan;
     WifiCredentials wifi{};
     char address[18]{};
     uint8_t address_type = 0;
+    uint8_t slot = kNoSlot;
+    bool remember = true;
+    bool all = false;
 };
 struct TrafficSnapshot {
     uint32_t http_requests = 0;
     uint32_t ble_requests = 0;
+    uint32_t serial_requests = 0;
     uint32_t rx_bytes = 0;
     uint32_t tx_bytes = 0;
     char last_transport[5]{};
@@ -45,6 +53,8 @@ Snapshot snapshot();
 WifiDiagnostics wifi_diagnostics();
 BleDiagnostics ble_diagnostics();
 TrafficSnapshot traffic_snapshot();
+MemorySnapshot memory_snapshot();
+CommandResult command_result(uint32_t ticket);
 // Physical display only. Never expose this helper through a radio request.
 bool copy_local_ap_password(char* output, size_t capacity);
 const char* wifi_state_name(WifiState state);

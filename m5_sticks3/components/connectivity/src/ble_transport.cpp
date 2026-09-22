@@ -124,12 +124,13 @@ struct BleTransport::Impl final : AppTask {
     }
 
 
-    enum class CommandKind : uint8_t { scan, connect, disconnect, enable };
+    enum class CommandKind : uint8_t { scan, connect, disconnect, enable, unpair };
     struct Command {
         CommandKind kind{};
         ble_addr_t address{};
         char peer_name[32]{};
         bool enabled = false;
+        bool all = false;
     };
     static constexpr UBaseType_t kCommandCapacity = 4;
     // Bound address accounting independently from the strongest-16 result list.
@@ -337,11 +338,20 @@ struct BleTransport::Impl final : AppTask {
     void begin_connect(const Command& command)
     {
 #if CONFIG_BT_NIMBLE_ROLE_CENTRAL
-        if (!radio_enabled.load(std::memory_order_acquire) ||
-            peer_connection != BLE_HS_CONN_HANDLE_NONE || is_connecting()) {
+        if (!radio_enabled.load(std::memory_order_acquire)) {
             update_diagnostics([](BleDiagnostics& value) { value.peer_error = BLE_HS_EBUSY; });
             return;
         }
+        if (peer_connection != BLE_HS_CONN_HANDLE_NONE || is_connecting()) {
+            pending_connect = command;
+            switch_deadline = esp_timer_get_time() + 15'000'000;
+            update_diagnostics([](BleDiagnostics& value) { value.switching = true; });
+            end_peer_connection();
+            return;
+        }
+        // A newer selection can arrive after the old DISCONNECT but before
+        // the pending-switch poll. Retire that old target before starting it.
+        switch_deadline = 0;
 #if CONFIG_BT_NIMBLE_ROLE_OBSERVER
         if (ble_gap_disc_active()) {
             const int result = ble_gap_disc_cancel();
@@ -357,6 +367,10 @@ struct BleTransport::Impl final : AppTask {
         update_diagnostics([&](BleDiagnostics& value) {
             value.connecting = true;
             value.peer_connected = false;
+            value.switching = false;
+            value.peer_encrypted = value.peer_bonded = false;
+            value.peer_identity[0] = 0;
+            value.peer_address_type = command.address.type;
             value.peer_error = 0;
             value.peer_rssi = 0;
             value.peer_mtu = 23;
@@ -414,6 +428,7 @@ struct BleTransport::Impl final : AppTask {
             refresh_enabled();
             return;
         }
+        cancel_switch();
         if (ble_gap_adv_active()) {
             const int result = ble_gap_adv_stop();
             if (result == 0 || result == BLE_HS_EALREADY) {
@@ -439,6 +454,72 @@ struct BleTransport::Impl final : AppTask {
             }
         }
         refresh_enabled();
+    }
+
+    void cancel_switch()
+    {
+        switch_deadline = 0;
+        update_diagnostics([](BleDiagnostics& value) { value.switching = false; });
+    }
+
+    void update_peer_identity(uint16_t handle)
+    {
+        ble_gap_conn_desc description{};
+        if (ble_gap_conn_find(handle, &description) != 0) return;
+        char identity[18]{};
+        format_address(description.peer_id_addr, identity);
+        update_diagnostics([&](BleDiagnostics& value) {
+            std::memcpy(value.peer_identity, identity, sizeof(identity));
+            value.peer_identity_type = description.peer_id_addr.type;
+            value.peer_encrypted = description.sec_state.encrypted;
+            value.peer_bonded = description.sec_state.bonded;
+        });
+    }
+
+    void refresh_bonds(int operation_error = 0, bool completed = false)
+    {
+        static_assert(CONFIG_BT_NIMBLE_MAX_BONDS <= kMaxBleBonds, "Increase bounded bond snapshot capacity");
+        ble_addr_t peers[kMaxBleBonds]{};
+        int count = 0;
+        const int result = ble_store_util_bonded_peers(peers, &count, kMaxBleBonds);
+        BlePeer rows[kMaxBleBonds]{};
+        if (result == 0) for (int i = 0; i < count; ++i) {
+            format_address(peers[i], rows[i].address); rows[i].address_type = peers[i].type;
+        }
+        update_diagnostics([&](BleDiagnostics& value) {
+            if (completed || (result == 0 && (value.bond_count != count ||
+                std::memcmp(value.bonds, rows, sizeof(rows)) != 0))) ++value.bond_generation;
+            if (completed || result != 0) value.bond_error = operation_error ? operation_error : result;
+            if (result == 0) { value.bond_count = count; std::memcpy(value.bonds, rows, sizeof(rows)); }
+        });
+    }
+
+    void unpair_peer(const Command& command)
+    {
+        int result = 0;
+        const auto same_address = [&](const ble_addr_t& address) {
+            return (address.type & 1) == (command.address.type & 1) &&
+                std::memcmp(address.val, command.address.val, sizeof(address.val)) == 0;
+        };
+        if (command.all || (switch_deadline && same_address(pending_connect.address))) cancel_switch();
+        if (is_connecting()) {
+            const auto observed = diagnostics();
+            ble_addr_t target{};
+            if (command.all || (parse_address(observed.peer_address, observed.peer_address_type, target) &&
+                same_address(target))) end_peer_connection();
+        }
+        if (command.all) {
+            ble_addr_t peers[kMaxBleBonds]{};
+            int count = 0;
+            result = ble_store_util_bonded_peers(peers, &count, kMaxBleBonds);
+            // Snapshot first: deleting one key changes the store's indices.
+            for (int i = 0; result == 0 && i < count; ++i) result = ble_gap_unpair(&peers[i]);
+        } else {
+            ble_addr_t identity = command.address;
+            identity.type &= 1;
+            result = ble_gap_unpair(&identity);
+        }
+        refresh_bonds(result, true);
     }
 
     static int service_discovered(uint16_t handle, const ble_gatt_error* error,
@@ -517,7 +598,15 @@ struct BleTransport::Impl final : AppTask {
                     !self->radio_enabled.load(std::memory_order_acquire) ||
                     !self->peer_connect_allowed ||
                     self->peer_connection != BLE_HS_CONN_HANDLE_NONE) {
-                    ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                    // A successful CONNECT can race an accepted cancellation.
+                    // Retain its handle until DISCONNECT so the next selection
+                    // cannot consume a still-occupied controller link slot.
+                    if (self->peer_connection == BLE_HS_CONN_HANDLE_NONE) {
+                        self->peer_connection = event->connect.conn_handle;
+                        self->peer_disconnect_requested = true;
+                    }
+                    const int result = ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                    if (result != 0) self->update_diagnostics([result](BleDiagnostics& value) { value.peer_error = result; });
                     break;
                 }
                 self->peer_connect_allowed = false;
@@ -526,7 +615,9 @@ struct BleTransport::Impl final : AppTask {
                 self->update_diagnostics([mtu](BleDiagnostics& value) {
                     value.peer_connected = true;
                     value.peer_mtu = mtu;
+                    ++value.peer_generation;
                 });
+                self->update_peer_identity(self->peer_connection);
                 // Primary service discovery works at the default MTU of 23.
                 // Do not gate read-only diagnostics on an optional exchange:
                 // an unresponsive MTU request can stall ATT for 30 seconds.
@@ -545,6 +636,7 @@ struct BleTransport::Impl final : AppTask {
                 self->peer_connection = BLE_HS_CONN_HANDLE_NONE;
                 self->update_diagnostics([event, expected](BleDiagnostics& value) {
                     value.peer_connected = false;
+                    value.peer_encrypted = value.peer_bonded = false;
                     value.connecting = false;
                     value.peer_rssi = 0;
                     value.peer_mtu = 23;
@@ -560,6 +652,7 @@ struct BleTransport::Impl final : AppTask {
             ble_gap_conn_desc description{};
             const int result = ble_gap_conn_find(event->enc_change.conn_handle, &description);
             if (result == 0 && description.role == BLE_GAP_ROLE_MASTER) {
+                self->update_peer_identity(event->enc_change.conn_handle);
                 ESP_LOGI(kTag, "analyzer security status=%d encrypted=%u bonded=%u key_bytes=%u",
                          event->enc_change.status,
                          static_cast<unsigned>(description.sec_state.encrypted),
@@ -600,12 +693,25 @@ struct BleTransport::Impl final : AppTask {
             switch (command.kind) {
             case CommandKind::scan: self->begin_scan(); break;
             case CommandKind::connect: self->begin_connect(command); break;
-            case CommandKind::disconnect: self->end_peer_connection(); break;
+            case CommandKind::disconnect: self->cancel_switch(); self->end_peer_connection(); break;
             case CommandKind::enable: self->change_enabled(command.enabled); break;
+            case CommandKind::unpair: self->unpair_peer(command); break;
             }
         }
+        if (self->switch_deadline) {
+            if (esp_timer_get_time() >= self->switch_deadline) {
+                self->cancel_switch();
+                self->update_diagnostics([](BleDiagnostics& value) { value.peer_error = BLE_HS_ETIMEOUT; });
+            } else if (self->peer_connection == BLE_HS_CONN_HANDLE_NONE && !self->is_connecting()) {
+                const auto next = self->pending_connect;
+                self->cancel_switch();
+                self->begin_connect(next);
+            }
+        }
+        self->refresh_bonds();
         self->refresh_enabled();
         if (self->peer_connection != BLE_HS_CONN_HANDLE_NONE) {
+            self->update_peer_identity(self->peer_connection);
             int8_t rssi = 0;
             const int result = ble_gap_conn_rssi(self->peer_connection, &rssi);
             if (result == 0) {
@@ -693,6 +799,7 @@ struct BleTransport::Impl final : AppTask {
             return;
         }
         self->host_synced.store(false, std::memory_order_release);
+        self->cancel_switch();
         self->connection = BLE_HS_CONN_HANDLE_NONE;
         self->peer_connection = BLE_HS_CONN_HANDLE_NONE;
         self->peer_connect_allowed = false;
@@ -704,6 +811,7 @@ struct BleTransport::Impl final : AppTask {
             value.peer_mtu = 23;
             value.peer_rssi = 0;
             value.peer_error = reason;
+            value.peer_encrypted = value.peer_bonded = false;
         });
         self->clear_response();
         self->update_state([](BleSnapshot& value) {
@@ -1093,6 +1201,8 @@ struct BleTransport::Impl final : AppTask {
     uint16_t peer_connection = BLE_HS_CONN_HANDLE_NONE;
     bool peer_connect_allowed = false;
     bool peer_disconnect_requested = false; // Host task owns connection intent.
+    Command pending_connect{};
+    int64_t switch_deadline = 0;
     ble_addr_t seen_addresses[kTrackedAddresses]{};
     size_t seen_count = 0;
     StaticQueue_t command_control{};
@@ -1184,6 +1294,8 @@ esp_err_t BleTransport::start(const char* name, RequestHandler handler, void* co
     self->peer_connect_allowed = false;
     self->peer_disconnect_requested = false;
     self->seen_count = 0;
+    self->switch_deadline = 0;
+    self->pending_connect = {};
     self->next_poll_us = 0;
     xQueueReset(self->commands);
     ble_npl_event_init(&self->command_event, Impl::process_host_event, self);
@@ -1277,6 +1389,7 @@ esp_err_t BleTransport::stop()
     self->host_event_pending.store(false, std::memory_order_release);
     xQueueReset(self->commands);
     self->peer_connection = BLE_HS_CONN_HANDLE_NONE;
+    self->cancel_switch();
     self->peer_connect_allowed = false;
     self->peer_disconnect_requested = false;
     self->update_diagnostics([](BleDiagnostics& value) {
@@ -1286,6 +1399,7 @@ esp_err_t BleTransport::stop()
         value.peer_connected = false;
         value.peer_mtu = 23;
         value.peer_rssi = 0;
+        value.peer_encrypted = value.peer_bonded = false;
     });
     self->connection = BLE_HS_CONN_HANDLE_NONE;
     self->clear_response();
@@ -1331,7 +1445,7 @@ esp_err_t BleTransport::request_scan()
 #endif
 }
 
-esp_err_t BleTransport::connect_peer(const char* address, uint8_t address_type)
+esp_err_t BleTransport::connect_peer(const char* address, uint8_t address_type, bool remembered)
 {
 #if CONFIG_BT_NIMBLE_ROLE_CENTRAL
     Impl* self = impl_.load(std::memory_order_acquire);
@@ -1344,7 +1458,7 @@ esp_err_t BleTransport::connect_peer(const char* address, uint8_t address_type)
     char normalized[18]{};
     Impl::format_address(command.address, normalized);
     const BleDiagnostics observed = self->diagnostics();
-    if (!observed.enabled || observed.peer_connected || observed.connecting) {
+    if (!observed.enabled) {
         return ESP_ERR_INVALID_STATE;
     }
     bool found = false;
@@ -1357,14 +1471,23 @@ esp_err_t BleTransport::connect_peer(const char* address, uint8_t address_type)
             break;
         }
     }
-    // Connections require an actual connectable result selected from the
-    // latest scan. Never probe arbitrary addresses supplied by a remote client.
-    return found ? self->enqueue(command) : ESP_ERR_NOT_FOUND;
+    // Only the service can authorize the remembered path, after a slot lookup.
+    return found || remembered ? self->enqueue(command) : ESP_ERR_NOT_FOUND;
 #else
     (void)address;
     (void)address_type;
+    (void)remembered;
     return ESP_ERR_NOT_SUPPORTED;
 #endif
+}
+
+esp_err_t BleTransport::unpair(const char* address, uint8_t address_type, bool all)
+{
+    Impl* self = impl_.load(std::memory_order_acquire);
+    if (!self) return ESP_ERR_INVALID_STATE;
+    Impl::Command command{}; command.kind = Impl::CommandKind::unpair; command.all = all;
+    if (!all && !Impl::parse_address(address, address_type, command.address)) return ESP_ERR_INVALID_ARG;
+    return self->enqueue(command);
 }
 
 esp_err_t BleTransport::disconnect_peer()
@@ -1444,7 +1567,8 @@ esp_err_t BleTransport::stop() { return ESP_OK; }
 BleSnapshot BleTransport::snapshot() { return {}; }
 
 esp_err_t BleTransport::request_scan() { return ESP_ERR_NOT_SUPPORTED; }
-esp_err_t BleTransport::connect_peer(const char*, uint8_t) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t BleTransport::connect_peer(const char*, uint8_t, bool) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t BleTransport::unpair(const char*, uint8_t, bool) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t BleTransport::disconnect_peer() { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t BleTransport::set_enabled(bool) { return ESP_ERR_NOT_SUPPORTED; }
 void BleTransport::process() {}

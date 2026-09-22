@@ -35,6 +35,9 @@ public:
     // Also updates the stopped driver without enabling RF; the next enable
     // uses this selection, including an explicitly cleared STA configuration.
     esp_err_t configure(const WifiCredentials& credentials);
+    // Owner-side confirmation against the current driver association/config
+    // and STA address; queued IP events alone cannot authorize persistence.
+    bool connection_matches(const WifiCredentials& credentials);
     // Owner-task operations; UI and transport callbacks enqueue these in Service.
     // A scan is asynchronous. Configuration/disconnect return ESP_ERR_WIFI_STATE
     // while it is active, and scans cannot interrupt an association attempt.

@@ -468,6 +468,27 @@ esp_err_t WifiTransport::configure(const WifiCredentials& credentials)
     return result;
 }
 
+bool WifiTransport::connection_matches(const WifiCredentials& credentials)
+{
+    if (!driver_started_ || !sta_netif_ || !valid_credentials(credentials)) return false;
+    const auto current = snapshot();
+    if (current.state != WifiState::connected || !current.address[0]) return false;
+    wifi_ap_record_t associated{};
+    wifi_config_t configured{};
+    esp_netif_ip_info_t ip{};
+    if (esp_wifi_sta_get_ap_info(&associated) != ESP_OK ||
+        esp_wifi_get_config(WIFI_IF_STA, &configured) != ESP_OK ||
+        esp_netif_get_ip_info(sta_netif_, &ip) != ESP_OK || !ip.ip.addr) return false;
+    const size_t ssid_size = std::strlen(credentials.ssid);
+    const size_t password_size = std::strlen(credentials.password);
+    return strnlen(reinterpret_cast<const char*>(associated.ssid), sizeof(associated.ssid)) == ssid_size &&
+        std::memcmp(associated.ssid, credentials.ssid, ssid_size) == 0 &&
+        strnlen(reinterpret_cast<const char*>(configured.sta.ssid), sizeof(configured.sta.ssid)) == ssid_size &&
+        std::memcmp(configured.sta.ssid, credentials.ssid, ssid_size) == 0 &&
+        strnlen(reinterpret_cast<const char*>(configured.sta.password), sizeof(configured.sta.password)) == password_size &&
+        std::memcmp(configured.sta.password, credentials.password, password_size) == 0;
+}
+
 esp_err_t WifiTransport::disconnect_station()
 {
     if (!driver_started_) return ESP_ERR_INVALID_STATE;
@@ -958,6 +979,7 @@ esp_err_t WifiTransport::stop() { return ESP_OK; }
 void WifiTransport::process() {}
 esp_err_t WifiTransport::configuration_ready() { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t WifiTransport::configure(const WifiCredentials&) { return ESP_ERR_NOT_SUPPORTED; }
+bool WifiTransport::connection_matches(const WifiCredentials&) { return false; }
 esp_err_t WifiTransport::request_scan() { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t WifiTransport::set_enabled(bool) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t WifiTransport::disconnect_station() { return ESP_ERR_NOT_SUPPORTED; }

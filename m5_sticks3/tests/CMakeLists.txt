@@ -28,6 +28,34 @@ enable_testing()
 add_test(NAME app_host_tests COMMAND app_host_tests)
 add_test(NAME connectivity_host_tests COMMAND connectivity_host_tests)
 
+add_executable(radio_console_tests radio_console_tests.cpp
+    ../components/connectivity/src/local_console_protocol.cpp)
+target_compile_features(radio_console_tests PRIVATE cxx_std_20)
+target_compile_options(radio_console_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(radio_console_tests PRIVATE ../components/connectivity/include)
+add_test(NAME radio_console_tests COMMAND radio_console_tests)
+
+# Use the exact SDK cJSON parser without requiring an ESP32 or copying vendor
+# sources into the repository. The pure protocol tests above need no SDK.
+set(M5_HOST_IDF_PATH "$ENV{IDF_PATH}" CACHE PATH "ESP-IDF source for radio service integration tests")
+if(EXISTS "${M5_HOST_IDF_PATH}/components/json/cJSON/cJSON.c")
+    add_library(radio_test_json STATIC "${M5_HOST_IDF_PATH}/components/json/cJSON/cJSON.c")
+    target_include_directories(radio_test_json PUBLIC "${M5_HOST_IDF_PATH}/components/json/cJSON")
+    foreach(test_target radio_service_tests radio_service_disabled_tests)
+        add_executable(${test_target} radio_service_tests.cpp
+            ../components/connectivity/src/connectivity_service.cpp
+            ../components/connectivity/src/local_console_protocol.cpp)
+        target_compile_features(${test_target} PRIVATE cxx_std_20)
+        target_compile_options(${test_target} PRIVATE -Wall -Wextra -Werror)
+        target_include_directories(${test_target} PRIVATE radio_service_stubs ../components/connectivity/include)
+        target_link_libraries(${test_target} PRIVATE radio_test_json)
+        add_test(NAME ${test_target} COMMAND ${test_target})
+    endforeach()
+    target_compile_definitions(radio_service_disabled_tests PRIVATE M5_TEST_NO_RADIOS=1)
+else()
+    message(STATUS "Radio service integration tests: set M5_HOST_IDF_PATH to an ESP-IDF source tree to enable")
+endif()
+
 add_executable(ble_bond_store_tests ble_bond_store_tests.cpp)
 target_compile_features(ble_bond_store_tests PRIVATE cxx_std_20)
 target_compile_options(ble_bond_store_tests PRIVATE -Wall -Wextra -Werror)
@@ -65,11 +93,17 @@ add_test(NAME infrared_protocol_tests COMMAND infrared_protocol_tests)
 
 option(M5_HOST_SANITIZERS "Enable host AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(M5_HOST_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    foreach(test_target app_host_tests connectivity_host_tests ble_bond_store_tests
+    foreach(test_target app_host_tests connectivity_host_tests radio_console_tests ble_bond_store_tests
                         bsp_power_tests audio_dsp_tests infrared_protocol_tests)
         target_compile_options(${test_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${test_target} PRIVATE -fsanitize=address,undefined)
     endforeach()
+    if(TARGET radio_service_tests)
+        foreach(test_target radio_service_tests radio_service_disabled_tests radio_test_json)
+            target_compile_options(${test_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(${test_target} PRIVATE -fsanitize=address,undefined)
+        endforeach()
+    endif()
 endif()
 
 add_executable(dap_protocol_tests dap_protocol_tests.cpp)

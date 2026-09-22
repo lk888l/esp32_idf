@@ -58,6 +58,16 @@ RMT 收发 DMA、NEC/扩展 NEC、原始信号学习回放及四个 NVS 存储�
 
 ## 无线界面快速操作
 
+正式固件也支持通过 USB 串口操作无线：`help`、`wifi scan`、`ble scan`、
+`wifi connect "SSID" "password"`、`wifi saved`、`wifi use 0`、`wifi forget 0`。
+Wi-Fi/BLE 各有四个连接记忆槽，支持临时连接、成功后记住、切换与取消记忆；
+BLE 配对密钥可单独查询和删除。串口同时接受 API v1 JSON，后续 USB 上位机可直接
+复用，异步请求通过 `ticket` 查询。命令、USB 分帧、迁移和验证说明见
+[本地无线命令与 USB 协议](docs/radio-console.md)。已通过 Docker 编译、12 项主机测试
+（含新增协议/服务的 ASan/UBSan）及 2026-09-22 实机验收：USB 命令/扫描/开关、
+Wi-Fi 热点与电脑 BLE 主动连接、成功后记忆、复位恢复及取消记忆。
+双目标切换、私有地址、安全取消配对和 USB DAP 切换仍需专项实测，详见该文档。
+
 主菜单用 **KEY1** 找到 **WIFI** 或 **BLE**，**KEY2** 打开。分析主页底部是当前动作：
 **KEY1 切换，KEY2 执行，长按 KEY2 返回**。进入 Scan nearby 后用 KEY1 选择结果、
 KEY2 查看详情；Wi-Fi 可输入密码连接，BLE 可连接可连接的广播设备并查看主服务。

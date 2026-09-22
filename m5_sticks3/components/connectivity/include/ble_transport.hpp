@@ -25,7 +25,10 @@ public:
     // Accepted commands execute on the host event queue. Async stack errors
     // are exposed through diagnostics; process never performs blocking RF I/O.
     esp_err_t request_scan();
-    esp_err_t connect_peer(const char* address, uint8_t address_type);
+    // Explicit remembered identities may connect without a fresh scan. A new
+    // selection cancels/disconnects the previous outbound link asynchronously.
+    esp_err_t connect_peer(const char* address, uint8_t address_type, bool remembered = false);
+    esp_err_t unpair(const char* address, uint8_t address_type, bool all);
     esp_err_t disconnect_peer();
     esp_err_t set_enabled(bool enabled);
     void process();

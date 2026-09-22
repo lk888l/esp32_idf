@@ -4,6 +4,11 @@
 app_modules 中的 ConnectivityModule 只接入生命周期；UI 读取状态快照，实体按键操作
 通过同一个有界队列提交。设备菜单操作见 [Wi-Fi / BLE 图形界面说明](radio-ui.md)。
 
+正式固件现已接入 USB 串口本地命令和 JSON 帧协议，支持运行时切换、四槽记忆、
+成功后保存、取消记忆和 BLE 取消配对。详细命令及迁移规则见
+[本地无线命令与 USB 协议](radio-console.md)。下文 `wifi.configure` 保留旧版先保存的
+语义；新增 `wifi.connect` 与屏幕连接操作在成功取得 IP 后保存。
+
 1. 在串口启动日志中找到 `local setup` 两行，取得设备独立的热点密码和 API 令牌。
    热点密码也可在 WIFI → Local hotspot 的实体屏幕中查看；API 令牌仍从串口读取。
 2. 连接 `M5StickS3-xxxxxx` 热点，默认地址为 `192.168.4.1`。当前这台设备名称为
@@ -26,6 +31,9 @@ app_modules 中的 ConnectivityModule 只接入生命周期；UI 读取状态快
 ## 历史验收记录（2026-09-05）
 
 以下记录对应 9 月 5 日的通信框架版本，不代表后来新增的图形扫描与主动外连功能已全部通过验证。
+2026-09-22 已在用户提供的临时热点上完成 STA DHCP、记忆和复位重连，并通过电脑
+BLE 主动连接及本地 USB 命令验收；最新范围和保留项见
+[无线命令实机记录](radio-console.md#实机验收2026-09-22)。
 
 下表区分已经通过的检查与仍待完成的实机验证。配网命令写入成功不代表 STA
 已连接路由器；只有连接状态与 DHCP 地址同时确认，才能判定 STA 连网成功。
@@ -51,8 +59,9 @@ The application retains its existing composition root and fixed-capacity
 `connectivity::Service`; it is registered after the board/motion/wave modules
 and before the UI. The manager still initializes in order and stops in reverse.
 
-`Service` is a facade over two transport adapters (`WifiTransport` and
-`BleTransport`). Both call the same versioned request handler. Transport
+`Service` is a facade over `WifiTransport`, `BleTransport`, and `SerialConsole`.
+All three call the same versioned request handler, with an explicit trusted
+physical-console origin that cannot be selected by a JSON field. Transport
 callbacks can read immutable snapshots or enqueue commands into a statically
 allocated four-entry queue. Only the application task applies and persists
 station configuration. NimBLE manages its own peer-bond NVS storage from the
@@ -99,7 +108,10 @@ and BLE readiness/connection status. Heap, PSRAM and uptime remain visible.
 The WIFI and BLE menu cards expose scans, link diagnostics, traffic/echo and
 runtime connection controls. Radio enable/disable and explicit disconnect are
 runtime choices; they do not overwrite boot settings or erase saved credentials
-and bonds. A submitted Wi-Fi configuration is persisted in NVS.
+and bonds. Legacy `wifi.configure` persists before applying; new `wifi.connect`
+and UI selections remember only after DHCP success, unless explicitly temporary.
+Four fixed slots per radio and explicit forget/unpair commands are documented
+in [the local console protocol](radio-console.md).
 
 ## API v1
 
@@ -115,7 +127,17 @@ Duplicate keys, trailing JSON, embedded NULs and excessive nesting are rejected.
 | `ping` | none | `reply: "pong"` |
 | `echo` | `data` (up to 128 UTF-8 bytes) | Return application data |
 | `telemetry` | none | Latest motion validity, count and Euler angles |
-| `wifi.configure` | `token`, `ssid`, `password` | Persist and apply station settings asynchronously |
+| `wifi.configure` | `token`, `ssid`, `password` | Legacy: persist and apply station settings asynchronously |
+| `wifi.connect` | `token`, `ssid`, `password`, optional boolean `remember` | Connect; default remembers after DHCP success |
+| `wifi.status` / `ble.status` | none | Radio link and pending memory/error state |
+| `wifi.saved` / `ble.saved` | optional `index` (slot 0–3) | Public profile metadata, never passwords |
+| `wifi.use` / `ble.use` | `token`, `slot` | Connect an explicitly saved target |
+| `wifi.remember` / `ble.remember` | `token` | Save the currently connected target |
+| `wifi.forget` / `ble.forget` | `token`, `slot` or `all:true` | Remove connection memory; keep active link |
+| `ble.reconnect` | `token` | Connect the preferred saved BLE identity |
+| `ble.bonds` / `ble.unpair` | optional `index` / `token` plus identity address/type or `all:true` | Inspect/delete pairing keys on the NimBLE host task |
+| `command.result` | `ticket` | Query one of the last 16 accepted commands |
+| `capabilities` / `help` | none / optional `topic` | Protocol limits, supported radios, local command syntax |
 | `wifi.clear` | `token` | Clear saved station settings asynchronously |
 | `wifi.scan` / `ble.scan` | `token` | Start a bounded asynchronous scan |
 | `wifi.scan.results` / `ble.scan.results` | optional `index` | Read scan metadata and one cached result |
@@ -127,7 +149,9 @@ Duplicate keys, trailing JSON, embedded NULs and excessive nesting are rejected.
 | `ble.peer` | optional `index` | Read outbound peer state and one cached service UUID |
 | `traffic` | none | Application JSON request/response counts, bytes and recent echo |
 
-For mutations, `{"result":"accepted"}` means queued, not connected or durable.
+For mutations, `{"result":"accepted","ticket":N}` means queued, not connected or durable.
+Use `command.result` to correlate a command across concurrent transports, then
+poll radio status and memory state for actual connection/persistence success.
 Poll `status`: `completed` is a monotonically increasing completion counter;
 `last_id` and `last_error` describe the most recently processed command.
 `last_error: 0` means the command was applied or its asynchronous operation was
@@ -139,13 +163,16 @@ At most 16 Wi-Fi/BLE scan results and 8 primary-service UUIDs are cached.
 Pass address and address_type from the selected scan result unchanged to `ble.connect`.
 `traffic` counts JSON at the common request handler, excluding HTTP headers,
 radio packets, transport overhead and retransmissions. Its displayed echo is
-limited to 64 bytes; primary-service discovery is separate from NUS JSON traffic. Multiple writers must
-coordinate because only the latest completion is retained. Queue saturation
+limited to 64 bytes; primary-service discovery is separate from NUS JSON traffic.
+Legacy `last_id/last_error` retain only the latest completion; new clients use
+the 16-entry ticket history. Queue saturation
 returns `busy`; callers should retry with bounded backoff.
 
-Stored changes are committed before reconnecting. If the driver fails after a
+Legacy `wifi.configure` changes are committed before reconnecting. If the driver fails after a
 commit, the saved settings remain and will be used on restart. Repeating a
 configuration reapplies it while avoiding an unnecessary identical NVS write.
+New `wifi.connect`/remember operations follow the success-dependent rules in
+the local console document.
 
 ### HTTP transport
 

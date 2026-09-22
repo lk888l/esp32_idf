@@ -35,6 +35,8 @@ MUTATIONS = (
     "wifi.configure", "wifi.clear", "wifi.scan", "wifi.reconnect",
     "wifi.disconnect", "wifi.enable", "wifi.disable",
     "ble.scan", "ble.connect", "ble.disconnect", "ble.enable", "ble.disable",
+    "wifi.connect", "wifi.remember", "wifi.forget", "wifi.use",
+    "ble.remember", "ble.forget", "ble.use", "ble.reconnect", "ble.unpair",
 )
 
 
@@ -175,9 +177,9 @@ class Suite:
                          "BLE peer: empty service list unexpectedly contains a row")
 
     def validate_traffic(self, data: dict) -> None:
-        for key in ("http_requests", "ble_requests", "rx_bytes", "tx_bytes"):
+        for key in ("http_requests", "ble_requests", "serial_requests", "rx_bytes", "tx_bytes"):
             self.integer(data, key, 0, UINT32_MAX)
-        self.require(self.string(data, "transport", 4) in ("", "HTTP", "BLE"),
+        self.require(self.string(data, "transport", 4) in ("", "HTTP", "BLE", "USB"),
                      "traffic: unknown transport")
         self.string(data, "operation", 23)
         self.string(data, "echo", 64)
