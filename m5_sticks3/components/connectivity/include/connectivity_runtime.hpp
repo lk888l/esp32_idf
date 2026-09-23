@@ -3,6 +3,7 @@
 #include "connectivity_policy.hpp"
 #include "wifi_diagnostics.hpp"
 #include "ble_diagnostics.hpp"
+#include "ble_gateway.hpp"
 #include "radio_memory.hpp"
 #include "command_history.hpp"
 #include "esp_err.h"
@@ -22,7 +23,7 @@ enum class ControlAction : uint8_t {
     wifi_enable, wifi_disable, wifi_clear, wifi_configure,
     wifi_remember, wifi_forget, wifi_use,
     ble_scan, ble_connect, ble_disconnect, ble_enable, ble_disable,
-    ble_remember, ble_forget, ble_use, ble_reconnect, ble_unpair
+    ble_remember, ble_forget, ble_use, ble_reconnect, ble_unpair, ble_gatt
 };
 struct ControlRequest {
     ControlAction action = ControlAction::wifi_scan;
@@ -32,6 +33,7 @@ struct ControlRequest {
     uint8_t slot = kNoSlot;
     bool remember = true;
     bool all = false;
+    gateway::Request gatt{};
 };
 struct TrafficSnapshot {
     uint32_t http_requests = 0;

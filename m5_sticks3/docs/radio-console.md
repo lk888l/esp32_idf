@@ -3,7 +3,7 @@
 正式固件现在支持通过 StickS3 自带的 **USB Serial/JTAG 串口**，在运行中扫描、
 连接、切换、断开 Wi-Fi/BLE，以及保存和忘记连接。图形菜单、串口、HTTP、BLE
 共用 `connectivity::Service` 的有界命令队列；扫描和连接在后台执行。
-本次实现包含设备侧协议，没有新增上位机应用。
+BLE 数据操作和配套电脑客户端见 [BLE 网关](ble-gateway.md)，串口输入 `help gatt` 获取帮助。
 
 ## 开始使用
 
@@ -45,7 +45,7 @@ BLE 扫描同理。无加密 Wi-Fi 使用显式空密码：`wifi connect "Open A
 
 | 命令 | 含义 |
 | --- | --- |
-| `help [wifi\|ble\|protocol]` | 分主题帮助 |
+| `help [wifi\|ble\|gatt\|protocol]` | 分主题帮助 |
 | `capabilities` | API 版本、编译启用的无线、请求/响应上限、队列/记忆容量 |
 | `status`、`ping`、`traffic` | 总状态、通道验证、HTTP/BLE/串口应用流量 |
 | `command TICKET` | 查询最近 16 个已接收命令中的一个 |

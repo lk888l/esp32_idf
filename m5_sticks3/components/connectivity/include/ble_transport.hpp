@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include "ble_diagnostics.hpp"
+#include "ble_gateway.hpp"
 #include "connectivity_types.hpp"
 #include "esp_err.h"
 
@@ -33,6 +34,10 @@ public:
     esp_err_t set_enabled(bool enabled);
     void process();
     BleDiagnostics diagnostics();
+    esp_err_t request_gatt(const gateway::Request& request, uint32_t ticket);
+    gateway::Status gatt_status();
+    gateway::ResultPage gatt_result(uint32_t ticket, size_t index, size_t offset);
+    gateway::EventPage gatt_event(uint32_t after, uint32_t sequence, size_t offset);
 
 private:
     struct Impl;

@@ -112,6 +112,37 @@ const char* compile(const char* line, uint32_t id, char* json, size_t capacity)
         uint32_t ticket;
         if (args.count != 2 || !unsigned_number(args.at(1), ticket) || ticket == 0) return "invalid_ticket";
         op("command.result"); out.number("ticket", ticket);
+    } else if (first == "gatt") {
+        const auto action = args.at(1);
+        char operation[40]{};
+        std::snprintf(operation, sizeof(operation), "ble.gatt.%.*s", static_cast<int>(action.size()), action.data());
+        op(operation);
+        const auto numeric = [&](size_t index, const char* key, uint32_t maximum, bool nonzero) {
+            uint32_t value = 0;
+            if (!unsigned_number(args.at(index), value) || value > maximum || (nonzero && !value)) return false;
+            out.number(key, value); return true;
+        };
+        if (action == "status") {
+            if (args.count != 2) return "usage";
+        } else if (action == "result") {
+            if (args.count < 3 || args.count > 5) return "usage";
+            if (!numeric(2, "ticket", UINT32_MAX, true)) return "invalid_ticket";
+            if (args.count >= 4 && !numeric(3, "index", 15, false)) return "invalid_index";
+            if (args.count == 5 && !numeric(4, "offset", 512, false)) return "invalid_offset";
+        } else {
+            const bool range = action == "characteristics" || action == "descriptors";
+            const bool handle = range || action == "read" || action == "write" || action == "subscribe";
+            const bool simple = action == "services" || action == "mtu" || action == "pair";
+            const size_t expected = range || action == "write" || action == "subscribe" ? 5 : handle ? 4 : 3;
+            if (!simple && !handle && action != "events") return "unknown_command";
+            if (args.count != expected && !(action == "events" && args.count == 4)) return "usage";
+            if (!numeric(2, "generation", UINT32_MAX, true)) return "invalid_generation";
+            if (handle && !numeric(3, "handle", UINT16_MAX, true)) return "invalid_handle";
+            if (range && !numeric(4, "end", UINT16_MAX, true)) return "invalid_range";
+            if (action == "subscribe" && !numeric(4, "mode", 2, false)) return "invalid_mode";
+            if (action == "write") out.string("data", args.at(4));
+            if (action == "events" && args.count == 4 && !numeric(3, "after", UINT32_MAX, false)) return "invalid_cursor";
+        }
     } else if (first == "wifi" || first == "ble") {
         const bool wifi = first == "wifi";
         const auto action = args.at(1);

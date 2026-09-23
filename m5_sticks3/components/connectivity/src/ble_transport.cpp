@@ -13,6 +13,7 @@
 
 #include "app_task.hpp"
 #include "ble_bond_store.hpp"
+#include "ble_gatt_client.hpp"
 #include "connectivity_policy.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -124,13 +125,15 @@ struct BleTransport::Impl final : AppTask {
     }
 
 
-    enum class CommandKind : uint8_t { scan, connect, disconnect, enable, unpair };
+    enum class CommandKind : uint8_t { scan, connect, disconnect, enable, unpair, gatt };
     struct Command {
         CommandKind kind{};
         ble_addr_t address{};
         char peer_name[32]{};
         bool enabled = false;
         bool all = false;
+        gateway::Request gatt{};
+        uint32_t ticket = 0;
     };
     static constexpr UBaseType_t kCommandCapacity = 4;
     // Bound address accounting independently from the strongest-16 result list.
@@ -379,8 +382,7 @@ struct BleTransport::Impl final : AppTask {
             std::memcpy(value.peer_name, command.peer_name, sizeof(value.peer_name));
             std::memset(value.services, 0, sizeof(value.services));
         });
-        // Only establish the user-selected link and inspect primary services;
-        // never write arbitrary remote characteristics or subscribe to them.
+        // GATT writes and subscriptions require separate explicit requests.
         peer_connect_allowed = true;
         peer_disconnect_requested = false;
         const int result = ble_gap_connect(address_type, &command.address, 10000,
@@ -399,6 +401,7 @@ struct BleTransport::Impl final : AppTask {
 
     void end_peer_connection()
     {
+        gatt.disconnected(); // Close admission before asynchronous termination.
 #if CONFIG_BT_NIMBLE_ROLE_CENTRAL
         peer_connect_allowed = false;
         int result = 0;
@@ -611,6 +614,7 @@ struct BleTransport::Impl final : AppTask {
                 }
                 self->peer_connect_allowed = false;
                 self->peer_connection = event->connect.conn_handle;
+                self->gatt.connected(self->peer_connection);
                 const uint16_t mtu = ble_att_mtu(self->peer_connection);
                 self->update_diagnostics([mtu](BleDiagnostics& value) {
                     value.peer_connected = true;
@@ -630,6 +634,7 @@ struct BleTransport::Impl final : AppTask {
             break;
         case BLE_GAP_EVENT_DISCONNECT:
             if (event->disconnect.conn.conn_handle == self->peer_connection) {
+                self->gatt.disconnected();
                 const bool expected = self->peer_disconnect_requested &&
                     event->disconnect.reason == BLE_HS_HCI_ERR(BLE_ERR_CONN_TERM_LOCAL);
                 self->peer_disconnect_requested = false;
@@ -649,6 +654,7 @@ struct BleTransport::Impl final : AppTask {
             break;
         case BLE_GAP_EVENT_ENC_CHANGE: {
             if (self->enforce_store_health(event->enc_change.conn_handle)) break;
+            self->gatt.security_complete(event->enc_change.conn_handle, event->enc_change.status);
             ble_gap_conn_desc description{};
             const int result = ble_gap_conn_find(event->enc_change.conn_handle, &description);
             if (result == 0 && description.role == BLE_GAP_ROLE_MASTER) {
@@ -661,6 +667,10 @@ struct BleTransport::Impl final : AppTask {
             }
             break;
         }
+        case BLE_GAP_EVENT_NOTIFY_RX:
+            self->gatt.notification(event->notify_rx.conn_handle, event->notify_rx.attr_handle,
+                                    event->notify_rx.indication, event->notify_rx.om);
+            break;
         case BLE_GAP_EVENT_MTU:
             if (event->mtu.conn_handle == self->peer_connection) {
                 self->update_diagnostics([event](BleDiagnostics& value) {
@@ -683,6 +693,7 @@ struct BleTransport::Impl final : AppTask {
             return;
         }
         if (self->enforce_store_health()) {
+            self->gatt.disconnected();
             xQueueReset(self->commands);
             self->host_event_pending.store(false, std::memory_order_release);
             return;
@@ -696,8 +707,12 @@ struct BleTransport::Impl final : AppTask {
             case CommandKind::disconnect: self->cancel_switch(); self->end_peer_connection(); break;
             case CommandKind::enable: self->change_enabled(command.enabled); break;
             case CommandKind::unpair: self->unpair_peer(command); break;
+            case CommandKind::gatt: self->gatt.execute(command.gatt, command.ticket); break;
             }
         }
+        // Retire timed-out ATT procedures by terminating their link; accepting
+        // another request on that bearer would allow late responses to alias.
+        if (self->gatt.expired(esp_timer_get_time())) self->end_peer_connection();
         if (self->switch_deadline) {
             if (esp_timer_get_time() >= self->switch_deadline) {
                 self->cancel_switch();
@@ -799,6 +814,7 @@ struct BleTransport::Impl final : AppTask {
             return;
         }
         self->host_synced.store(false, std::memory_order_release);
+        self->gatt.disconnected();
         self->cancel_switch();
         self->connection = BLE_HS_CONN_HANDLE_NONE;
         self->peer_connection = BLE_HS_CONN_HANDLE_NONE;
@@ -1193,6 +1209,7 @@ struct BleTransport::Impl final : AppTask {
     portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
     BleSnapshot state{};
     BleDiagnostics analyzer{};
+    gateway::Client gatt;
     std::atomic<bool> stopping{false};
     std::atomic<bool> radio_enabled{true};
     std::atomic<bool> host_synced{false};
@@ -1386,6 +1403,7 @@ esp_err_t BleTransport::stop()
         ble_npl_event_deinit(&self->command_event);
         self->command_event_initialized = false;
     }
+    self->gatt.disconnected();
     self->host_event_pending.store(false, std::memory_order_release);
     xQueueReset(self->commands);
     self->peer_connection = BLE_HS_CONN_HANDLE_NONE;
@@ -1537,6 +1555,35 @@ void BleTransport::process()
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &self->command_event);
 }
 
+esp_err_t BleTransport::request_gatt(const gateway::Request& request, uint32_t ticket)
+{
+    Impl* self = impl_.load(std::memory_order_acquire);
+    if (!self) return ESP_ERR_INVALID_STATE;
+    const auto reserved = self->gatt.reserve(request, ticket);
+    if (reserved != gateway::none) return reserved == gateway::busy ? ESP_ERR_TIMEOUT :
+        reserved == gateway::invalid_request ? ESP_ERR_INVALID_ARG : ESP_ERR_INVALID_STATE;
+    Impl::Command command{};
+    command.kind = Impl::CommandKind::gatt; command.gatt = request; command.ticket = ticket;
+    const auto result = self->enqueue(command);
+    if (result != ESP_OK) self->gatt.reject(ticket);
+    return result;
+}
+gateway::Status BleTransport::gatt_status()
+{
+    Impl* self = impl_.load(std::memory_order_acquire);
+    return self ? self->gatt.status() : gateway::Status{};
+}
+gateway::ResultPage BleTransport::gatt_result(uint32_t ticket, size_t index, size_t offset)
+{
+    Impl* self = impl_.load(std::memory_order_acquire);
+    return self ? self->gatt.result(ticket, index, offset) : gateway::ResultPage{};
+}
+gateway::EventPage BleTransport::gatt_event(uint32_t after, uint32_t sequence, size_t offset)
+{
+    Impl* self = impl_.load(std::memory_order_acquire);
+    return self ? self->gatt.event(after, sequence, offset) : gateway::EventPage{};
+}
+
 BleDiagnostics BleTransport::diagnostics()
 {
     Impl* self = impl_.load(std::memory_order_acquire);
@@ -1573,6 +1620,10 @@ esp_err_t BleTransport::disconnect_peer() { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t BleTransport::set_enabled(bool) { return ESP_ERR_NOT_SUPPORTED; }
 void BleTransport::process() {}
 BleDiagnostics BleTransport::diagnostics() { return {}; }
+esp_err_t BleTransport::request_gatt(const gateway::Request&, uint32_t) { return ESP_ERR_NOT_SUPPORTED; }
+gateway::Status BleTransport::gatt_status() { return {}; }
+gateway::ResultPage BleTransport::gatt_result(uint32_t, size_t, size_t) { return {}; }
+gateway::EventPage BleTransport::gatt_event(uint32_t, uint32_t, size_t) { return {}; }
 
 
 } // namespace connectivity

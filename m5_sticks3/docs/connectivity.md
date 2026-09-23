@@ -213,8 +213,10 @@ Finish reading before sending another request. Disconnect clears the response
 and restarts peripheral advertising. There is one inbound NUS client slot and
 one outbound central slot, for at most two concurrent links. The central role
 scans advertisers, connects an explicitly selected connectable peer and caches
-its primary-service UUIDs. It does not write arbitrary characteristics or
-implement the complete application protocol of the peer. Scanning does not
+its primary-service UUIDs. The explicit [BLE gateway API](ble-gateway.md) adds
+service/characteristic/descriptor discovery, reads, acknowledged writes and
+notification/indication subscriptions. It does not implement the complete
+application protocol of the peer. Scanning does not
 discover classic Bluetooth devices, and this is not SPP, audio or general file transfer.
 
 The NUS link uses Secure Connections with Just Works encryption and persists peer

@@ -58,6 +58,13 @@ RMT 收发 DMA、NEC/扩展 NEC、原始信号学习回放及四个 NVS 存储�
 
 ## 无线界面快速操作
 
+新增 **BLE 网关**：通过 USB 串口 / Wi-Fi HTTP / 加密 BLE 控制外部 BLE 设备，
+支持服务、特征与描述符发现、长读取、确认写入、订阅通知/指示、MTU 协商和配对。
+USB 沿用原生 CDC-ACM 串口；提供统一电脑客户端、连接代次保护、有界结果/事件缓存。
+入口为串口的 `help gatt` 或 `python tools/ble_gateway.py --port /dev/ttyACM0 status`。
+见 [BLE 网关说明](docs/ble-gateway.md)。本轮固件构建与 15 项主机测试通过，
+新增网关尚未烧录和实机验收。
+
 正式固件也支持通过 USB 串口操作无线：`help`、`wifi scan`、`ble scan`、
 `wifi connect "SSID" "password"`、`wifi saved`、`wifi use 0`、`wifi forget 0`。
 Wi-Fi/BLE 各有四个连接记忆槽，支持临时连接、成功后记住、切换与取消记忆；

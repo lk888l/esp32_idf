@@ -1,6 +1,8 @@
 #pragma once
 #include "platform.hpp"
 #include "ble_diagnostics.hpp"
+#include "ble_gateway.hpp"
+namespace fake { inline connectivity::gateway::Store gatt{}; }
 namespace fake { inline connectivity::BleDiagnostics ble_diag{}; }
 namespace connectivity {
 class BleTransport {
@@ -21,5 +23,12 @@ public:
     int unpair(const char*, uint8_t, bool) { return ESP_OK; }
     BleSnapshot snapshot() { return {}; }
     BleDiagnostics diagnostics() { return fake::ble_diag; }
+    int request_gatt(const gateway::Request& request, uint32_t ticket)
+    { return fake::gatt.reserve(request, ticket) == gateway::none ? ESP_OK : ESP_ERR_INVALID_STATE; }
+    gateway::Status gatt_status() { return fake::gatt.status(); }
+    gateway::ResultPage gatt_result(uint32_t ticket, size_t index, size_t offset)
+    { return fake::gatt.result(ticket, index, offset); }
+    gateway::EventPage gatt_event(uint32_t after, uint32_t sequence, size_t offset)
+    { return fake::gatt.event(after, sequence, offset); }
 };
 }

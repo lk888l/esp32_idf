@@ -155,6 +155,44 @@ void common_checks(Service& service)
     for (size_t i = 1; i < 4; ++i) check(command_result(tickets[i]).ticket == tickets[i], "pending receipt retained after saturation");
     for (int i = 0; i < 4; ++i) service.process();
 }
+[[maybe_unused]] void gateway_checks(Service& service)
+{
+    fake::gatt.connect();
+    check(cli("help gatt").ok() && cli("gatt status").number("connected") == 1, "gateway console");
+    const auto auth = R"("token":"11111111111111111111111111111111")";
+    for (auto handler : {fake::http, fake::ble}) {
+        for (const auto* operation : {"status", "result", "events", "read", "write", "subscribe"}) {
+            const auto json = std::string(R"({"v":1,"id":1,"op":"ble.gatt.)") + operation + R"("})";
+            check(invoke(json.c_str(), handler).string("error") == "unauthorized", "gateway data requires radio auth");
+        }
+        const auto json = std::string(R"({"v":1,"id":1,"op":"ble.gatt.status",)") + auth + "}";
+        check(invoke(json.c_str(), handler, 512).ok(), "authenticated gateway fits BLE response");
+    }
+    check(cli("gatt write 1 7 zz").string("error") == "invalid_data", "bad hex rejected before queueing");
+    check(cli("gatt write 1 7 f").string("error") == "invalid_data", "odd hex rejected");
+    check(cli("gatt characteristics 1 7 6").string("error") == "invalid_request", "invalid range");
+    check(cli("gatt read 2 7").string("error") == "stale_generation", "wrong generation rejected");
+    check(invoke(R"({"v":1,"id":1,"op":"ble.gatt.read","generation":1,"handle":7,"mode":1})").string("error") == "unknown_field", "strict schemas");
+    const auto ticket = submit("gatt read 1 7");
+    const auto query = std::string("gatt result ") + std::to_string(ticket);
+    check(cli(query.c_str()).string("state") == "queued", "service queue visible");
+    service.process();
+    check(cli("gatt read 1 7").string("error") == "busy", "one ATT procedure at a time");
+    fake::gatt.start(ticket, fake::now);
+    uint8_t bytes[gateway::kValueBytes]; std::memset(bytes, 0xff, sizeof(bytes));
+    fake::gatt.append(ticket, 0, bytes, sizeof(bytes)); fake::gatt.finish(ticket, 0);
+    check(cli(query.c_str()).string("data").size() == 128, "long result paginated");
+    check(cli((query + " 0 512").c_str()).string("data").empty(), "end offset");
+    for (unsigned i = 0; i < gateway::kEvents + 1; ++i) fake::gatt.notify(7, false, bytes, sizeof(bytes));
+    check(cli("gatt events 1").number("lost") == 1, "event loss surfaced");
+    const auto event_json = std::string(R"({"v":1,"id":1,"op":"ble.gatt.events","generation":1,"sequence":2,"offset":64,)") + auth + "}";
+    check(invoke(event_json.c_str(), fake::ble, 512).string("data").size() == 128, "BLE event paging");
+    check(invoke(R"({"v":1,"id":1,"op":"ble.gatt.events","generation":1,"sequence":2,"after":0})").string("error") == "invalid_cursor", "ambiguous cursor rejected");
+    const auto stale = submit("gatt write 1 7 0100");
+    fake::gatt.disconnect(); fake::gatt.connect(); service.process();
+    check(command_result(stale).error != ESP_OK && !fake::gatt.status().active_ticket, "queued write cannot cross target switch");
+    fake::gatt.disconnect();
+}
 }
 int main()
 {
@@ -164,9 +202,11 @@ int main()
     common_checks(service);
 #if CONFIG_M5_CONNECTIVITY_WIFI_ENABLED
     radio_checks(service);
+    gateway_checks(service);
 #else
     check(cli("wifi on").string("error") == "disabled", "Wi-Fi compile-out is explicit");
     check(cli("ble on").string("error") == "disabled", "BLE compile-out is explicit");
+    check(cli("gatt status").string("error") == "disabled", "gateway compile-out is explicit");
     check(cli("capabilities").number("wifi") == 0 && cli("capabilities").number("ble") == 0, "capabilities reflect compiled transports");
 #endif
     check(service.deinitialize() == ESP_OK, "shutdown");

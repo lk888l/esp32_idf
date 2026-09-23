@@ -25,6 +25,20 @@ target_include_directories(connectivity_host_tests PRIVATE
 )
 
 enable_testing()
+add_executable(ble_gateway_tests ble_gateway_tests.cpp ../components/connectivity/src/ble_gateway.cpp)
+target_compile_features(ble_gateway_tests PRIVATE cxx_std_20)
+target_compile_options(ble_gateway_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(ble_gateway_tests PRIVATE ../components/connectivity/include)
+add_test(NAME ble_gateway_tests COMMAND ble_gateway_tests)
+
+add_executable(ble_gatt_client_tests ble_gatt_client_tests.cpp
+    ../components/connectivity/src/ble_gateway.cpp ../components/connectivity/src/ble_gatt_client.cpp)
+target_compile_features(ble_gatt_client_tests PRIVATE cxx_std_20)
+target_compile_options(ble_gatt_client_tests PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(ble_gatt_client_tests PRIVATE CONFIG_BT_NIMBLE_ENABLED=1)
+target_include_directories(ble_gatt_client_tests PRIVATE gatt_stubs radio_service_stubs
+    ../components/connectivity/include ../components/connectivity/src)
+add_test(NAME ble_gatt_client_tests COMMAND ble_gatt_client_tests)
 add_test(NAME app_host_tests COMMAND app_host_tests)
 add_test(NAME connectivity_host_tests COMMAND connectivity_host_tests)
 
@@ -44,7 +58,9 @@ if(EXISTS "${M5_HOST_IDF_PATH}/components/json/cJSON/cJSON.c")
     foreach(test_target radio_service_tests radio_service_disabled_tests)
         add_executable(${test_target} radio_service_tests.cpp
             ../components/connectivity/src/connectivity_service.cpp
-            ../components/connectivity/src/local_console_protocol.cpp)
+            ../components/connectivity/src/local_console_protocol.cpp
+            ../components/connectivity/src/ble_gateway.cpp
+            ../components/connectivity/src/ble_gateway_protocol.cpp)
         target_compile_features(${test_target} PRIVATE cxx_std_20)
         target_compile_options(${test_target} PRIVATE -Wall -Wextra -Werror)
         target_include_directories(${test_target} PRIVATE radio_service_stubs ../components/connectivity/include)
@@ -93,7 +109,7 @@ add_test(NAME infrared_protocol_tests COMMAND infrared_protocol_tests)
 
 option(M5_HOST_SANITIZERS "Enable host AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(M5_HOST_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    foreach(test_target app_host_tests connectivity_host_tests radio_console_tests ble_bond_store_tests
+    foreach(test_target ble_gateway_tests ble_gatt_client_tests app_host_tests connectivity_host_tests radio_console_tests ble_bond_store_tests
                         bsp_power_tests audio_dsp_tests infrared_protocol_tests)
         target_compile_options(${test_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${test_target} PRIVATE -fsanitize=address,undefined)
@@ -126,4 +142,5 @@ if(M5_HOST_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     endforeach()
 endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME ble_gateway_client_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/ble_gateway_client_tests.py)
 add_test(NAME dap_bridge_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/dap_bridge_tests.py)

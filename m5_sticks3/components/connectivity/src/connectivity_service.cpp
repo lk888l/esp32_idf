@@ -4,6 +4,7 @@
 #include "wifi_transport.hpp"
 #include "ble_transport.hpp"
 #include "serial_console.hpp"
+#include "ble_gateway_protocol.hpp"
 
 #include <array>
 #include <atomic>
@@ -259,6 +260,9 @@ struct Service::Impl {
     {
         if (!accepting.load(std::memory_order_acquire)) return ESP_ERR_INVALID_STATE;
         switch (request.action) {
+        case ControlAction::ble_gatt:
+            if (!gateway::valid(request.gatt)) return ESP_ERR_INVALID_ARG;
+            break;
         case ControlAction::wifi_connect: case ControlAction::wifi_configure:
             if (!valid_credentials(request.wifi)) return ESP_ERR_INVALID_ARG;
             break;
@@ -409,9 +413,10 @@ struct Service::Impl {
         }
     }
 
-    esp_err_t execute(const ControlRequest& request)
+    esp_err_t execute(const ControlRequest& request, uint32_t ticket)
     {
         switch (request.action) {
+        case ControlAction::ble_gatt: return ble.request_gatt(request.gatt, ticket);
         case ControlAction::wifi_scan: return wifi.request_scan();
         case ControlAction::wifi_enable: return wifi.set_enabled(true);
         case ControlAction::wifi_disable: case ControlAction::wifi_disconnect: {
@@ -644,6 +649,23 @@ struct Service::Impl {
             record.operation[i] = c >= 32 && c <= 126 ? c : '?';
             record.operation[i + 1] = '\0';
         }
+        if (op.starts_with("ble.gatt.")) {
+#if !CONFIG_M5_CONNECTIVITY_BLE_ENABLED
+            fail("disabled"); return;
+#else
+            // Attribute values and notifications are private; radio queries
+            // require the same authentication as gateway mutations.
+            char token[33]{};
+            if (origin != Origin::serial && (!copy_string(get("token"), token, sizeof(token)) ||
+                !constant_time_equal(token, settings.token))) { fail("unauthorized"); return; }
+            gateway::dispatch(root.get(), id, ble,
+                [](void* context, const gateway::Request& request, uint32_t request_id, uint32_t* ticket) {
+                    ControlRequest control{}; control.action = ControlAction::ble_gatt; control.gatt = request;
+                    return static_cast<Impl*>(context)->enqueue(control, request_id, ticket);
+                }, this, output, capacity);
+            return;
+#endif
+        }
         Json response(cJSON_CreateObject(), cJSON_Delete);
         if (!response) { fail("no_memory"); return; }
         if (!cJSON_AddNumberToObject(response.get(), "v", 1) ||
@@ -666,10 +688,11 @@ struct Service::Impl {
             char topic[16]{};
             if (get("topic") && !copy_string(get("topic"), topic, sizeof(topic))) { fail("invalid_topic"); return; }
             const char* help = nullptr;
-            if (!topic[0]) help = "help [wifi|ble|protocol]; status; ping; traffic; capabilities; command TICKET. Quote names/passwords with spaces. No device input echo/history.";
+            if (!topic[0]) help = "help [wifi|ble|gatt|protocol]; status; ping; traffic; capabilities; command TICKET. Quote names/passwords with spaces. No device input echo/history.";
             else if (!strcmp(topic, "wifi")) help = "wifi status|scan|results [INDEX]|saved [SLOT]|on|off|disconnect|reconnect|remember; wifi connect SSID PASSWORD [--remember|--temporary]; wifi use SLOT; wifi forget SLOT|all. Empty password: \"\". Default: remember after DHCP; 4 stable slots (0..3).";
             else if (!strcmp(topic, "ble")) help = "ble status|scan|results [INDEX]|peer [INDEX]|saved [SLOT]|bonds [INDEX]|on|off|disconnect|reconnect|remember; ble connect ADDRESS TYPE [--remember|--temporary]; ble use SLOT; ble forget SLOT|all; ble unpair ADDRESS TYPE|all. TYPE: public/random/public-id/random-id (0..3). Forget removes profile; unpair removes security keys.";
             else if (!strcmp(topic, "protocol")) help = "Input: CLI or one API v1 JSON object per LF/CRLF (JSON <=256 bytes). Output: RS (0x1e), JSON, LF; ignore logs outside records. accepted + ticket means queued; command TICKET reports applied/error. Poll wifi/ble status for actual link and memory result. Physical USB is trusted; radio mutations require token. Tickets expire after 16 accepted commands or reboot.";
+            else if (!strcmp(topic, "gatt")) help = "gatt status; gatt services|mtu|pair GENERATION; gatt characteristics|descriptors GENERATION HANDLE END; gatt read GENERATION HANDLE; gatt write GENERATION HANDLE HEX; gatt subscribe GENERATION CCCD MODE (0=off,1=notify,2=indicate); gatt result TICKET [INDEX [OFFSET]]; gatt events GENERATION [AFTER]. Poll result until complete/failed; generation comes from status.";
             else { fail("invalid_topic"); return; }
             built = cJSON_AddStringToObject(response.get(), "help", help) != nullptr;
         } else if (op == "capabilities") {
@@ -683,8 +706,10 @@ struct Service::Impl {
 #endif
 #if CONFIG_M5_CONNECTIVITY_BLE_ENABLED
             number("ble", 1);
+            number("ble_gateway", 1);
 #else
             number("ble", 0);
+            number("ble_gateway", 0);
 #endif
             string("serial_framing", "RS-JSON-LF"); string("auth", origin == Origin::serial ? "physical" : "token");
         } else if (op == "command.result") {
@@ -982,7 +1007,7 @@ void Service::process()
     Command command{};
     // One command per tick bounds application-loop latency and flash activity.
     if (xQueueReceive(self.queue, &command, 0) == pdPASS) {
-        const esp_err_t result = self.execute(command.control);
+        const esp_err_t result = self.execute(command.control, command.ticket);
         self.state.last_id = command.id;
         self.state.last_error = result;
         ++self.state.completed;
