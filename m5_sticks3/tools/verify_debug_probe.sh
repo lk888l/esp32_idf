@@ -13,5 +13,7 @@ ctest --test-dir build/dap-ui-tests --output-on-failure
 cp sdkconfig build/dap-verification.sdkconfig
 idf.py -B build/dap-verification -D SDKCONFIG="$project_dir/build/dap-verification.sdkconfig" build
 for mode in usb wifi ble; do
-    openocd -f "tools/openocd/sticks3-$mode.cfg" -c shutdown
+    for transport in swd jtag; do
+        openocd -c "set DAP_TRANSPORT $transport" -f "tools/openocd/sticks3-$mode.cfg" -c shutdown
+    done
 done

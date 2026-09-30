@@ -129,7 +129,8 @@ target_include_directories(dap_protocol_tests PRIVATE ../components/debug_probe/
 add_test(NAME dap_protocol_tests COMMAND dap_protocol_tests)
 
 add_executable(dap_engine_tests dap_engine_tests.cpp
-    ../components/debug_probe/vendor/DAP.c ../components/debug_probe/vendor/SW_DP.c)
+    ../components/debug_probe/vendor/DAP.c ../components/debug_probe/vendor/SW_DP.c
+    ../components/debug_probe/vendor/JTAG_DP.c)
 target_compile_features(dap_engine_tests PRIVATE cxx_std_20)
 target_compile_options(dap_engine_tests PRIVATE -Wall -Wextra -Wno-unused-variable)
 target_include_directories(dap_engine_tests PRIVATE dap_stubs ../components/debug_probe/include

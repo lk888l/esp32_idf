@@ -57,7 +57,7 @@ int main() {
     assert(fake::starts==0); // Construction/menu browsing never enables DAP.
     for(auto mode:{debug_probe::Mode::usb,debug_probe::Mode::wifi,debug_probe::Mode::ble}) {
         auto* screen=ui.open(mode); assert(screen); lv_screen_load(screen);
-        fake::probe.swd=true; fake::probe.connected=true; fake::probe.packets=1234;
+        fake::probe.jtag=false; fake::probe.swd=true; fake::probe.connected=true; fake::probe.packets=1234;
         fake::radio.wifi.ap_active=true; std::strcpy(fake::radio.wifi.ap_address,"192.168.4.1");
         fake::radio.ble.enabled=true; fake::radio.ble.encrypted=true; fake::radio.ble.mtu=23;
         lv_tick_inc(200); ui.update();
@@ -65,6 +65,9 @@ int main() {
         assert(!ui.select(false)); // Change ceiling from 1000 to 2000 kHz.
         capture("dap_speed");
         ui.next(); assert(!ui.select(false)); capture("dap_wiring");
+        fake::probe.swd=false; fake::probe.jtag=true;
+        lv_tick_inc(200); ui.update(); capture("dap_jtag_wiring");
+        assert(!ui.select(false)); capture("dap_jtag_stats");
         ui.next(); assert(!ui.select(false)); assert(fake::probe.mode==debug_probe::Mode::off);
         assert(!ui.select(false)); assert(fake::probe.mode==mode);
         assert(ui.select(true)); // Exit is consumed by the outer menu controller.

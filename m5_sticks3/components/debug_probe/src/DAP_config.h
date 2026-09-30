@@ -9,7 +9,8 @@
 #define CPU_CLOCK 240000000U
 #define IO_PORT_WRITE_CYCLES 0U
 #define DAP_SWD 1
-#define DAP_JTAG 0
+#define DAP_JTAG 1
+#define DAP_JTAG_DEV_CNT 8U
 #define DAP_DEFAULT_PORT 1U
 #define DAP_DEFAULT_SWJ_CLOCK 1000000U
 #define DAP_PACKET_SIZE 64U
@@ -28,6 +29,7 @@ extern "C" {
 uint32_t probe_set_clock(uint32_t hz);
 void probe_port_off(void);
 void probe_port_swd(void);
+void probe_port_jtag(void);
 uint8_t probe_serial(char* text);
 uint8_t probe_reset(void);
 int probe_cancelled(void);
@@ -47,10 +49,11 @@ static inline uint8_t DAP_GetTargetDeviceNameString(char* p) { (void)p; return 0
 static inline uint8_t DAP_GetTargetBoardVendorString(char* p) { (void)p; return 0; }
 static inline uint8_t DAP_GetTargetBoardNameString(char* p) { (void)p; return 0; }
 static inline uint8_t DAP_GetSerNumString(char* p) { return probe_serial(p); }
-static inline uint8_t DAP_GetProductFirmwareVersionString(char* p) { strcpy(p,"1.0.0"); return 6; }
+static inline uint8_t DAP_GetProductFirmwareVersionString(char* p) { strcpy(p,"1.1.0"); return 6; }
 #define PORT_OFF() probe_port_off()
 #define DAP_SETUP() probe_port_off()
 #define PORT_SWD_SETUP() probe_port_swd()
+#define PORT_JTAG_SETUP() probe_port_jtag()
 #define RESET_TARGET() probe_reset()
 #define LED_CONNECTED_OUT(v) probe_host_status(0,(v))
 #define LED_RUNNING_OUT(v) probe_host_status(1,(v))
@@ -68,8 +71,9 @@ static inline uint8_t DAP_GetProductFirmwareVersionString(char* p) { strcpy(p,"1
 #define PIN_nRESET_IN() ((GPIO.in >> 8) & 1U)
 // Reset is always open drain: high releases the target's own pull-up.
 #define PIN_nRESET_OUT(v) do { if ((v)&1U) GPIO.out_w1ts = (1U << 8); else GPIO.out_w1tc = (1U << 8); } while(0)
-#define PIN_TDI_IN() 0U
-#define PIN_TDO_IN() 0U
+#define PIN_TDI_IN() ((GPIO.in >> 1) & 1U)
+#define PIN_TDO_IN() ((GPIO.in >> 2) & 1U)
+// No dedicated nTRST; reset the TAP with TMS high for at least five clocks.
 #define PIN_nTRST_IN() 1U
-#define PIN_TDI_OUT(v) ((void)(v))
+#define PIN_TDI_OUT(v) do { if ((v)&1U) GPIO.out_w1ts = (1U << 1); else GPIO.out_w1tc = (1U << 1); } while(0)
 #define PIN_nTRST_OUT(v) ((void)(v))

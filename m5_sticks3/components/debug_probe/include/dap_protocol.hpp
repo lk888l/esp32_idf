@@ -7,7 +7,27 @@
 namespace debug_probe {
 inline constexpr size_t kPacketSize = 64;
 inline constexpr uint16_t kTcpPort = 4441;
-inline constexpr unsigned kSwclk = 6, kSwdio = 7, kReset = 8;
+inline constexpr uint16_t kDiscoveryPort = 4442;
+inline constexpr char kDiscoveryRequest[] = "STICKS3_DAP_V1?";
+inline constexpr char kDiscoveryReply[] = "STICKS3_DAP_V1!";
+inline constexpr size_t kDiscoveryTagSize = sizeof(kDiscoveryReply) - 1;
+inline constexpr size_t kDiscoveryReplySize = kDiscoveryTagSize + 12 + 2;
+inline bool is_discovery_request(const uint8_t* p, size_t n) {
+    return p && n == sizeof(kDiscoveryRequest) - 1 &&
+        std::memcmp(p, kDiscoveryRequest, sizeof(kDiscoveryRequest) - 1) == 0;
+}
+inline std::array<uint8_t, kDiscoveryReplySize> discovery_reply(const char* serial) {
+    std::array<uint8_t, kDiscoveryReplySize> result{};
+    std::memcpy(result.data(), kDiscoveryReply, kDiscoveryTagSize);
+    std::memcpy(result.data() + kDiscoveryTagSize, serial, 12);
+    result[kDiscoveryTagSize + 12] = kTcpPort >> 8;
+    result[kDiscoveryTagSize + 13] = kTcpPort & 0xff;
+    return result;
+}
+inline constexpr unsigned kSwclk = 6, kSwdio = 7, kReset = 8, kTdi = 1, kTdo = 2;
+inline constexpr unsigned kMaxJtagDevices = 8, kMaxJtagIrBits = 32;
+inline constexpr uint32_t kPinMask = (1U << kSwclk) | (1U << kSwdio) |
+    (1U << kReset) | (1U << kTdi) | (1U << kTdo);
 inline constexpr std::array<uint32_t, 5> kClockPresets = {100000, 250000, 500000, 1000000, 2000000};
 struct Packet { uint16_t size = 0; uint8_t data[kPacketSize]{}; };
 inline uint16_t read16(const uint8_t* p) { return uint16_t(p[0]) | (uint16_t(p[1]) << 8); }
@@ -64,6 +84,28 @@ inline bool valid_request(const uint8_t* p, size_t n) {
         output = 4 + ((p[4] & 2) ? 4 * count : 0);
         break;
     }
+    case 0x14: // Each JTAG sequence always consumes TDI, optionally captures TDO.
+        if (n < 2) return false;
+        need = 2; output = 2;
+        for (unsigned i = 0; i < p[1]; ++i) {
+            if (need >= n) return false;
+            const uint8_t info = p[need++];
+            const size_t bytes = (((info & 63) ? (info & 63) : 64) + 7) / 8;
+            need += bytes;
+            if (info & 0x80) output += bytes;
+            if (need > n || output > kPacketSize) return false;
+        }
+        break;
+    case 0x15:
+        if (n < 2 || p[1] > kMaxJtagDevices) return false;
+        need = 2 + p[1]; output = 2;
+        if (need > n) return false;
+        // Zero devices clears the chain. Zero IR length would underflow the
+        // reference shifter; keep each device's IR within its 32-bit value.
+        for (size_t i = 2; i < need; ++i)
+            if (!p[i] || p[i] > kMaxJtagIrBits) return false;
+        break;
+    case 0x16: need = 2; output = 6; break;
     case 0x1d:
         if (n < 2) return false;
         need = 2; output = 2;

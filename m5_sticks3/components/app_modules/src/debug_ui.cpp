@@ -73,12 +73,13 @@ void DebugUi::update() {
                            (mode_ == debug_probe::Mode::ble && !radio.ble.enabled);
     text(status_, paused_ ? "PAUSED" : control_error_ != ESP_OK ? "RADIO ERROR" : radio_off ? "RADIO OFF" :
         state.error != ESP_OK ? "START ERROR" : state.mode != mode_ || !state.ready ? "STARTING" :
-        state.swd ? "SWD ACTIVE" : state.connected ? "HOST LINK" : "WAITING HOST");
+        state.jtag ? "JTAG ACTIVE" : state.swd ? "SWD ACTIVE" : state.connected ? "HOST LINK" : "WAITING HOST");
     char buffer[200];
     snprintf(buffer, sizeof(buffer), "%lu kHz", static_cast<unsigned long>(ceiling / 1000)); text(clock_, buffer);
-    text(hint_, "SWD speed limit");
+    text(hint_, "SWD/JTAG limit");
     if (wiring_) {
-        text(details_, "G6 CLK / G7 DIO\nG8 NRST / GND\n3.3V target only\nPower target itself");
+        text(details_, state.jtag ? "G6 TCK / G7 TMS\nG1 TDI / G2 TDO\nG8 NRST / GND\n3.3V self-powered" :
+            "G6 CLK / G7 DIO\nG8 NRST / GND\nJTAG: G1 DI G2 DO\n3.3V self-powered");
     } else if (state.error != ESP_OK || control_error_ != ESP_OK) {
         snprintf(buffer, sizeof(buffer), "Error 0x%X\nPause / resume\nto retry", unsigned(state.error != ESP_OK ? state.error : control_error_)); text(details_, buffer);
     } else if (mode_ == debug_probe::Mode::wifi) {
@@ -87,10 +88,10 @@ void DebugUi::update() {
             static_cast<unsigned long>(state.clock_hz/1000), static_cast<unsigned long>(state.packets),
             static_cast<unsigned long>(state.errors), state.last_ack, static_cast<unsigned long>(state.last_us)); text(details_, buffer);
     } else if (mode_ == debug_probe::Mode::ble) {
-        snprintf(buffer, sizeof(buffer), "MTU %u / %s\nSWD cfg %lu k\n%lu pkt / %lu err\nPC bridge needed", radio.ble.mtu, radio.ble.encrypted ? "ENC" : "PAIR",
+        snprintf(buffer, sizeof(buffer), "MTU %u / %s\nClock %lu k\n%lu pkt / %lu err\nPC bridge needed", radio.ble.mtu, radio.ble.encrypted ? "ENC" : "PAIR",
             static_cast<unsigned long>(state.clock_hz/1000), static_cast<unsigned long>(state.packets), static_cast<unsigned long>(state.errors)); text(details_, buffer);
     } else {
-        snprintf(buffer, sizeof(buffer), "Bulk FS / 64 bytes\nSWD cfg %lu k\n%lu pkt / %lu err\nACK %02X / %lu us", static_cast<unsigned long>(state.clock_hz/1000),
+        snprintf(buffer, sizeof(buffer), "Bulk FS / 64 bytes\nClock %lu k\n%lu pkt / %lu err\nACK %02X / %lu us", static_cast<unsigned long>(state.clock_hz/1000),
             static_cast<unsigned long>(state.packets), static_cast<unsigned long>(state.errors), state.last_ack, static_cast<unsigned long>(state.last_us)); text(details_, buffer);
     }
     const char* actions[] = {"> Change limit", "> Wiring / stats", paused_ ? "> Resume probe" : "> Pause probe", "> Back to menu", "> Enable radio"};

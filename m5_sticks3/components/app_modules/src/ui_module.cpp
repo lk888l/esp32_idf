@@ -616,11 +616,11 @@ private:
                  unsigned(memory.free_size), unsigned(memory.free_biggest_size), unsigned(memory.max_used));
         const auto state = debug_probe::snapshot();
         const auto radio = connectivity::snapshot();
-        ESP_LOGI(kTag, "DAP TEST mode=%u ready=%u connected=%u swd=%u clock=%lu limit=%lu packets=%lu errors=%lu error=%d gpio_out=%lu heap=%lu min_heap=%lu sta=%s ap=%s ble=%u enc=%u mtu=%u",
-                 unsigned(state.mode), state.ready, state.connected, state.swd,
+        ESP_LOGI(kTag, "DAP TEST mode=%u ready=%u connected=%u swd=%u jtag=%u clock=%lu limit=%lu packets=%lu errors=%lu error=%d gpio_out=%lu heap=%lu min_heap=%lu sta=%s ap=%s ble=%u enc=%u mtu=%u",
+                 unsigned(state.mode), state.ready, state.connected, state.swd, state.jtag,
                  (unsigned long)state.clock_hz, (unsigned long)state.limit_hz,
                  (unsigned long)state.packets, (unsigned long)state.errors, int(state.error),
-                 (unsigned long)(GPIO.enable & ((1U << 6) | (1U << 7) | (1U << 8))),
+                 (unsigned long)(GPIO.enable & debug_probe::kPinMask),
                  (unsigned long)esp_get_free_heap_size(), (unsigned long)esp_get_minimum_free_heap_size(),
                  radio.wifi.address, radio.wifi.ap_address, radio.ble.enabled,
                  radio.ble.encrypted, radio.ble.mtu);
@@ -642,6 +642,15 @@ private:
         } else if (!std::strcmp(command, "off") || !std::strcmp(command, "back")) {
             if (current_page_ == Page::debug) key2(true);
             dap_test_deadline_ = 0;
+        } else if (!std::strcmp(command, "tdo-low") || !std::strcmp(command, "tdo-high") ||
+                   !std::strcmp(command, "tdo-float")) {
+            // No-target JTAG input check, available only in the smoke build.
+            // Disconnect/exit clears these pulls through probe_port_off().
+            if (debug_probe::snapshot().jtag) {
+                const auto pull = !std::strcmp(command, "tdo-low") ? GPIO_PULLDOWN_ONLY :
+                                  !std::strcmp(command, "tdo-high") ? GPIO_PULLUP_ONLY : GPIO_FLOATING;
+                gpio_set_pull_mode(static_cast<gpio_num_t>(debug_probe::kTdo), pull);
+            }
         } else if (!std::strcmp(command, "next")) {
             key1();
         } else if (!std::strcmp(command, "select")) {
@@ -1502,8 +1511,8 @@ private:
             "Mic levels / recorder",
             "IR learn / remote",
             "USB CMSIS-DAP v2",
-            "WiFi SWD debugger",
-            "BLE SWD debugger",
+            "WiFi SWD / JTAG",
+            "BLE SWD / JTAG",
         };
         lv_obj_move_foreground(cards_[selected_]);
         for (size_t index = 0; index < cards_.size(); ++index) {

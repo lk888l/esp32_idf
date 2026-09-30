@@ -20,6 +20,27 @@ int main() {
     assert(valid({0x1d,2,0x88,8,0xa5})); assert(!valid({0x1d,2,0x88,8}));
     assert(!valid({0x1d,8,0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80}));
     assert(!valid({0x12,0})); assert(!valid({0x7f,0xff})); assert(!valid({0x80}));
+    assert(valid({0x14,0})); assert(valid({0x14,1,0xc1,1}));
+    assert(!valid({0x14})); assert(!valid({0x14,1,0xc1}));
+    assert(valid({0x14,1,0x80,1,2,3,4,5,6,7,8}));
+    assert(!valid({0x14,1,0x80,1,2,3,4,5,6,7}));
+    assert(!valid({0x14,2,0x88,0xaa}));
+    assert(valid({0x15,0})); assert(valid({0x15,1,4}));
+    assert(valid({0x15,8,1,2,4,8,16,24,31,32}));
+    assert(!valid({0x15,9,4,4,4,4,4,4,4,4,4}));
+    assert(!valid({0x15,1,0})); assert(!valid({0x15,1,33}));
+    assert(!valid({0x15,2,4})); assert(!valid({0x16})); assert(valid({0x16,7}));
+    const auto* query = reinterpret_cast<const uint8_t*>(kDiscoveryRequest);
+    assert(is_discovery_request(query, sizeof(kDiscoveryRequest) - 1));
+    assert(!is_discovery_request(query, sizeof(kDiscoveryRequest)));
+    assert(!is_discovery_request(query, sizeof(kDiscoveryRequest) - 2));
+    assert(!is_discovery_request(nullptr, sizeof(kDiscoveryRequest) - 1));
+    auto announcement = discovery_reply("14C19FD536F4");
+    assert(announcement.size() == kDiscoveryReplySize);
+    assert(std::memcmp(announcement.data(), kDiscoveryReply, kDiscoveryTagSize) == 0);
+    assert(std::memcmp(announcement.data() + kDiscoveryTagSize, "14C19FD536F4", 12) == 0);
+    assert((uint16_t(announcement[kDiscoveryTagSize + 12]) << 8 |
+            announcement[kDiscoveryTagSize + 13]) == kTcpPort);
     uint8_t h[8]{}; uint16_t n=0; tcp_header(h,64,1); assert(tcp_length(h,n)&&n==64);
     h[6]=2; assert(!tcp_length(h,n)); h[6]=1; h[7]=1; assert(!tcp_length(h,n));
     h[7]=0; h[4]=65; assert(!tcp_length(h,n));

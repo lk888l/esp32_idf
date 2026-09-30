@@ -20,6 +20,7 @@ extern "C" {
 }
 
 namespace debug_probe {
+static_assert(kMaxJtagDevices == DAP_JTAG_DEV_CNT);
 namespace {
 portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 Snapshot state;
@@ -44,7 +45,7 @@ void clear_ble() {
 }
 void reset_session() {
     DAP_Setup(); // releases all target pins, resets transfer configuration
-    update([](Snapshot& s) { s.swd = false; s.running = false; s.connected = false; });
+    update([](Snapshot& s) { s.swd = false; s.jtag = false; s.running = false; s.connected = false; });
 }
 Packet execute(const Packet& request) {
     Packet reply{};
@@ -77,6 +78,7 @@ Packet execute(const Packet& request) {
         s.last_command = request.data[0];
         s.last_us = esp_timer_get_time() - start;
         s.swd = DAP_Data.debug_port == DAP_PORT_SWD;
+        s.jtag = DAP_Data.debug_port == DAP_PORT_JTAG;
         if (reply.data[0] == 5 && reply.size >= 3) s.last_ack = reply.data[2];
         if (reply.data[0] == 6 && reply.size >= 4) s.last_ack = reply.data[3];
         if ((reply.data[0] == 5 || reply.data[0] == 6) && s.last_ack != 1) ++s.errors;
@@ -90,7 +92,7 @@ public:
 private:
     Mode mode = Mode::off;
     uint32_t session = 0;
-    int server = -1, client = -1;
+    int server = -1, discovery = -1, client = -1;
     uint8_t header[8]{};
     size_t header_used = 0, body_used = 0;
     Packet input{}, output{};
@@ -108,6 +110,7 @@ private:
     bool stop_mode() {
         update([](Snapshot& s) { s.ready = false; });
         close_client();
+        if (discovery >= 0) { close(discovery); discovery = -1; }
         if (server >= 0) { close(server); server = -1; }
         clear_ble();
         if (mode == Mode::usb) {
@@ -132,10 +135,34 @@ private:
         }
         return ESP_OK;
     }
+    esp_err_t listen_discovery() {
+        discovery = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (discovery < 0) return ESP_FAIL;
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(kDiscoveryPort);
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (bind(discovery, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) ||
+            fcntl(discovery, F_SETFL, O_NONBLOCK) < 0) {
+            close(discovery); discovery = -1; return ESP_FAIL;
+        }
+        return ESP_OK;
+    }
+    void poll_discovery() {
+        uint8_t request[sizeof(kDiscoveryRequest)];
+        sockaddr_in peer{};
+        socklen_t peer_size = sizeof(peer);
+        const int size = recvfrom(discovery, request, sizeof(request), 0,
+                                  reinterpret_cast<sockaddr*>(&peer), &peer_size);
+        if (!is_discovery_request(request, size < 0 ? 0 : size)) return;
+        const auto reply = discovery_reply(serial);
+        (void)sendto(discovery, reply.data(), reply.size(), 0,
+                     reinterpret_cast<sockaddr*>(&peer), peer_size);
+    }
     void start_mode(Mode next) {
         mode = next;
         gpio_config_t pins{};
-        pins.pin_bit_mask = (1ULL << kSwclk) | (1ULL << kSwdio) | (1ULL << kReset);
+        pins.pin_bit_mask = kPinMask;
         pins.mode = GPIO_MODE_INPUT;
         const auto pin_error = gpio_config(&pins);
         if (pin_error != ESP_OK) {
@@ -148,11 +175,15 @@ private:
         reset_session();
         esp_err_t err = ESP_OK;
         if (mode == Mode::usb) err = usb_start();
-        if (mode == Mode::wifi) err = listen_tcp();
+        if (mode == Mode::wifi) {
+            err = listen_tcp();
+            if (err == ESP_OK) err = listen_discovery();
+            if (err != ESP_OK && server >= 0) { close(server); server = -1; }
+        }
         update([&](Snapshot& s) { s.ready = err == ESP_OK; s.error = err; });
     }
     void poll_tcp() {
-        // Drain additional connections immediately; exactly one host owns SWD.
+        // Drain additional connections immediately; exactly one host owns the target port.
         const int peer = accept(server, nullptr, nullptr);
         if (peer >= 0) {
             if (client >= 0) close(peer);
@@ -244,7 +275,7 @@ private:
             }
             if (snapshot().ready) {
                 if (mode == Mode::usb) poll_usb();
-                if (mode == Mode::wifi) poll_tcp();
+                if (mode == Mode::wifi) { poll_discovery(); poll_tcp(); }
                 if (mode == Mode::ble) poll_ble();
             }
             vTaskDelay(pdMS_TO_TICKS(mode == Mode::off ? 10 : 1));
@@ -312,20 +343,27 @@ extern "C" uint32_t probe_set_clock(uint32_t hz) {
     requested_clock = hz;
     const uint32_t applied = std::min(std::max<uint32_t>(hz, 1000U), clock_limit.load());
     update([&](Snapshot& s) { s.clock_hz = applied; s.limit_hz = clock_limit.load(); });
-    // Full half-period delay plus GPIO/instruction overhead: physical SWCLK is
+    // Full half-period delay plus GPIO/instruction overhead: physical SWCLK/TCK is
     // never faster than requested. UI shows configured rate, not a measurement.
     return (CPU_CLOCK / 2 + applied - 1) / applied;
 }
 extern "C" void probe_port_off(void) {
-    for (const auto pin : {GPIO_NUM_6, GPIO_NUM_7, GPIO_NUM_8}) {
+    for (const auto pin : {GPIO_NUM_6, GPIO_NUM_7, GPIO_NUM_8, GPIO_NUM_1, GPIO_NUM_2}) {
         gpio_set_direction(pin, GPIO_MODE_INPUT); gpio_set_pull_mode(pin, GPIO_FLOATING);
     }
 }
 extern "C" void probe_port_swd(void) {
+    probe_port_off(); // Also release TDI when changing from JTAG to SWD.
     gpio_set_level(GPIO_NUM_6, 1); gpio_set_level(GPIO_NUM_7, 1); gpio_set_level(GPIO_NUM_8, 1);
     gpio_set_direction(GPIO_NUM_6, GPIO_MODE_INPUT_OUTPUT);
     gpio_set_direction(GPIO_NUM_7, GPIO_MODE_INPUT_OUTPUT);
     gpio_set_direction(GPIO_NUM_8, GPIO_MODE_INPUT_OUTPUT_OD);
+}
+extern "C" void probe_port_jtag(void) {
+    probe_port_swd(); // TCK/TMS share SWCLK/SWDIO; NRST remains open drain.
+    gpio_set_level(GPIO_NUM_1, 1);
+    gpio_set_direction(GPIO_NUM_1, GPIO_MODE_INPUT_OUTPUT);
+    // TDO (G2) stays input, without an internal pull changing target levels.
 }
 extern "C" uint8_t probe_serial(char* text) { std::memcpy(text, debug_probe::serial, 13); return 13; }
 extern "C" uint8_t probe_reset(void) {
