@@ -25,6 +25,7 @@
 #include "radio_ui.hpp"
 #include "peripheral_ui.hpp"
 #include "debug_ui.hpp"
+#include "clock_ui.hpp"
 #include "motion_runtime.hpp"
 #include "motion_state.hpp"
 #include "wave_generator.hpp"
@@ -69,6 +70,7 @@ enum class Page : uint8_t {
     radio,
     peripheral,
     debug,
+    clock,
 };
 
 using AnimExec = void (*)(void*, int32_t);
@@ -256,10 +258,11 @@ public:
             radio_smoke_timer_ = nullptr;
         }
 #endif
-        if ((current_page_ == Page::radio || current_page_ == Page::peripheral || current_page_ == Page::debug) && menu_screen_) lv_screen_load(menu_screen_);
+        if ((current_page_ == Page::radio || current_page_ == Page::peripheral || current_page_ == Page::debug || current_page_ == Page::clock) && menu_screen_) lv_screen_load(menu_screen_);
         radio_ui_.close();
         peripheral_ui_.close();
         debug_ui_.close();
+        clock_ui_.close();
         request_motion_enabled(false);
         auto& generator = wave::Generator::instance();
         if (generator.initialized() && generator.enabled()) {
@@ -290,6 +293,7 @@ public:
             }
         }
         menu_screen_ = nullptr;
+        menu_clock_label_ = nullptr;
         motion_screen_ = nullptr;
         ambient_screen_ = nullptr;
         system_screen_ = nullptr;
@@ -351,6 +355,9 @@ public:
     void key2(bool long_press)
     {
         switch (current_page_) {
+        case Page::clock:
+            if (clock_ui_.select(long_press)) show_menu();
+            break;
         case Page::debug:
             if (debug_ui_.select(long_press)) show_menu();
             break;
@@ -616,6 +623,12 @@ private:
                  unsigned(memory.free_size), unsigned(memory.free_biggest_size), unsigned(memory.max_used));
         const auto state = debug_probe::snapshot();
         const auto radio = connectivity::snapshot();
+        const auto clock = clock_service::snapshot();
+        ESP_LOGI(kTag, "CLOCK TEST state=%s valid=%u online=%u epoch=%lld count=%lu interval=%lu error=%d menu_time=%s",
+                 clock_service::state_name(clock.state), unsigned(clock.valid), unsigned(clock.online),
+                 static_cast<long long>(clock.epoch), static_cast<unsigned long>(clock.sync_count),
+                 static_cast<unsigned long>(clock_service::sync_interval_s()), int(clock.error),
+                 menu_clock_label_ ? lv_label_get_text(menu_clock_label_) : "--:--:--");
         ESP_LOGI(kTag, "DAP TEST mode=%u ready=%u connected=%u swd=%u jtag=%u clock=%lu limit=%lu packets=%lu errors=%lu error=%d gpio_out=%lu heap=%lu min_heap=%lu sta=%s ap=%s ble=%u enc=%u mtu=%u",
                  unsigned(state.mode), state.ready, state.connected, state.swd, state.jtag,
                  (unsigned long)state.clock_hz, (unsigned long)state.limit_hz,
@@ -699,7 +712,9 @@ private:
 #ifdef M5_STICKS3_DAP_SMOKE_TEST
         dap_test_poll();
 #endif
-        if (current_page_ == Page::motion) {
+        if (current_page_ == Page::menu) {
+            update_menu_clock();
+        } else if (current_page_ == Page::motion) {
             update_motion();
         } else if (current_page_ == Page::system) {
             update_system();
@@ -711,6 +726,8 @@ private:
             debug_ui_.update();
         } else if (current_page_ == Page::peripheral) {
             peripheral_ui_.update();
+        } else if (current_page_ == Page::clock) {
+            clock_ui_.update();
         }
     }
 
@@ -736,9 +753,13 @@ private:
         lv_obj_set_style_bg_opa(bloom_b, LV_OPA_10, 0);
         lv_obj_set_style_border_width(bloom_b, 0, 0);
 
-        lv_obj_t* brand = create_label(menu_screen_, "STICKS3", &lv_font_montserrat_12,
-                                       lv_color_hex(0x8292AE));
-        lv_obj_set_pos(brand, 8, 9);
+        menu_clock_label_ = create_label(menu_screen_, "--:--:--", &lv_font_montserrat_12,
+                                          lv_color_hex(0x8292AE));
+        lv_obj_set_pos(menu_clock_label_, 8, 9);
+        lv_obj_set_width(menu_clock_label_, 55);
+        lv_label_set_long_mode(menu_clock_label_, LV_LABEL_LONG_CLIP);
+        menu_clock_refresh_ = lv_tick_get() - 1000;
+        update_menu_clock();
 
         menu_battery_label_ = create_label(menu_screen_, "--%", &lv_font_montserrat_12,
                                            lv_color_hex(0x65758F));
@@ -786,14 +807,14 @@ private:
         start_loop_animation(selector_glow_, anim_border_opa, LV_OPA_20, LV_OPA_70,
                              1100, 1100);
 
-        constexpr std::array<const char*, 13> symbols = {
+        constexpr std::array<const char*, 14> symbols = {
             LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS,
             LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH,
             LV_SYMBOL_VOLUME_MAX, LV_SYMBOL_AUDIO, LV_SYMBOL_WIFI,
-            LV_SYMBOL_USB, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH};
-        constexpr std::array<const char*, 13> titles = {
+            LV_SYMBOL_USB, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH, LV_SYMBOL_BELL};
+        constexpr std::array<const char*, 14> titles = {
             "MOTION", "AURA", "SYSTEM", "WAVE", "ARCADE", "WIFI", "BLE",
-            "SPEAKER", "MIC", "IR", "USB DAP", "W-DAP", "B-DAP"};
+            "SPEAKER", "MIC", "IR", "USB DAP", "W-DAP", "B-DAP", "CLOCK"};
         for (size_t index = 0; index < cards_.size(); ++index) {
             lv_obj_t* card = create_glass_panel(menu_screen_, 31, 148, 72, 72);
             cards_[index] = card;
@@ -1499,7 +1520,7 @@ private:
 
     void update_carousel(bool boot)
     {
-        constexpr std::array<const char*, 13> descriptions = {
+        constexpr std::array<const char*, 14> descriptions = {
             "On-demand 100 Hz VQF",
             "Layered aura animation",
             "Memory and uptime",
@@ -1513,6 +1534,7 @@ private:
             "USB CMSIS-DAP v2",
             "WiFi SWD / JTAG",
             "BLE SWD / JTAG",
+            "WiFi auto-sync clock",
         };
         lv_obj_move_foreground(cards_[selected_]);
         for (size_t index = 0; index < cards_.size(); ++index) {
@@ -1601,6 +1623,10 @@ private:
         case 10: show_debug(debug_probe::Mode::usb); return;
         case 11: show_debug(debug_probe::Mode::wifi); return;
         case 12: show_debug(debug_probe::Mode::ble); return;
+        case 13:
+            current_page_ = Page::clock;
+            target = clock_ui_.open();
+            break;
         default:
             current_page_ = Page::arcade;
             target = arcade_screen_;
@@ -1643,6 +1669,13 @@ private:
 
     void show_menu()
     {
+        if (current_page_ == Page::clock) {
+            current_page_ = Page::menu;
+            lv_screen_load(menu_screen_);
+            clock_ui_.close();
+            update_carousel(false);
+            return;
+        }
         if (current_page_ == Page::debug) {
             current_page_ = Page::menu;
             lv_screen_load(menu_screen_);
@@ -2073,6 +2106,18 @@ private:
         }
     }
 
+    void update_menu_clock()
+    {
+        if (!menu_clock_label_) return;
+        const uint32_t now = lv_tick_get();
+        if (now - menu_clock_refresh_ < 1000) return;
+        menu_clock_refresh_ = now;
+        const auto clock = clock_service::snapshot();
+        if (std::string_view(lv_label_get_text(menu_clock_label_)) != clock.time) {
+            lv_label_set_text(menu_clock_label_, clock.time);
+        }
+    }
+
     void update_system()
     {
         const auto network = connectivity::snapshot();
@@ -2098,12 +2143,15 @@ private:
     lv_obj_t* wave_screen_ = nullptr;
     lv_obj_t* arcade_screen_ = nullptr;
     lv_obj_t* game_screen_ = nullptr;
-    std::array<lv_obj_t*, 13> cards_{};
+    std::array<lv_obj_t*, 14> cards_{};
     RadioUi radio_ui_{};
     PeripheralUi peripheral_ui_{};
     DebugUi debug_ui_{};
+    ClockUi clock_ui_{};
     lv_obj_t* selector_glow_ = nullptr;
     lv_obj_t* menu_hint_ = nullptr;
+    lv_obj_t* menu_clock_label_ = nullptr;
+    uint32_t menu_clock_refresh_ = 0;
     lv_obj_t* menu_battery_label_ = nullptr;
     lv_obj_t* menu_battery_frame_ = nullptr;
     lv_obj_t* menu_battery_fill_ = nullptr;

@@ -17,6 +17,7 @@
 - `MOTION` 页面：BMI270 原始加速度、VQF 四元数派生的 Roll/Pitch/Yaw、动态姿态仪
 - `AURA` 页面：低速多层环形/粒子动画，用于展示偏重质量的动画风格
 - `SYSTEM` 页面：Wi-Fi IP、BLE 状态、堆内存、PSRAM 和运行时间
+- `CLOCK` 页面：北京时间、日期/星期、联网自动校时、每小时刷新、断网继续走时
 - `WIFI` / `BLE` 页面：附近设备扫描、RSSI / 链路分析、运行时连接与开关、应用流量与 echo 回显
 - 双按键 Wi-Fi 密码编辑、设备热点密码查看、BLE 主动连接与主服务 UUID 分析
 - `ARCADE` 页面：三款针对 135×240 小屏和双按键设计的小游戏
@@ -88,6 +89,19 @@ KEY2 查看详情；Wi-Fi 可输入密码连接，BLE 可连接可连接的广�
 
 完整操作与边界见 [图形界面说明](docs/radio-ui.md)，实机结果见
 [2026-09-08 验收记录](docs/radio-ui.md#本轮验收记录2026-09-08)。
+
+## 时钟操作
+
+主界面左上角显示当前 `HH:MM:SS`，每秒刷新；尚未校时时显示 `--:--:--`。
+
+主菜单新增第 14 张 **CLOCK** 卡片，KEY2 打开。默认显示北京时间（UTC+8），
+联网取得 STA 地址后立即启动 SNTP，使用 `ntp.aliyun.com` 和 `pool.ntp.org`，
+之后每小时自动刷新。KEY1 返回；短按 KEY2 请求校时，长按 KEY2 返回。
+断网后时间继续走动，恢复网络自动重新校时。未成功校时前显示 `--:--`。
+
+USB 串口支持 `clock` / `clock status` 查询、`clock sync` / `ntp` 手动校时、
+`help clock` 查看帮助。时区、接口、复现测试和无电池 RTC 的限制见
+[时钟说明](docs/clock.md)。
 
 ## 小游戏操作
 
@@ -186,7 +200,7 @@ idf.py -B build/hw-smoke -p /dev/ttyACM0 flash monitor
 验证完成后重新烧录 `build/codex-idf` 中的正式固件。
 
 菜单动画回归使用 `M5_STICKS3_DAP_SMOKE_TEST=ON` 的串口测试入口。它会循环全部
-13 张卡片、快速连按验证排队切换，并进入/返回 AURA 和 SYSTEM；默认固件不含此入口。
+14 张卡片、快速连按验证排队切换，并进入/返回 AURA、SYSTEM 和 CLOCK；默认固件不含此入口。
 在已加载 IDF 的容器中构建并烧录：
 
 ```bash

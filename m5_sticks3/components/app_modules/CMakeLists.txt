@@ -10,6 +10,7 @@ idf_component_register(
         "src/peripheral_module.cpp"
         "src/peripheral_ui.cpp"
         "src/debug_ui.cpp"
+        "src/clock_ui.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -28,6 +29,7 @@ idf_component_register(
         audio
         infrared
         debug_probe
+        clock
 )
 
 if(M5_STICKS3_HW_SMOKE_TEST)

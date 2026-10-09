@@ -1,0 +1,20 @@
+menu "M5-StickS3 Clock"
+    config M5_CLOCK_TIMEZONE
+        string "POSIX timezone"
+        default "CST-8"
+        help
+            Passed to TZ/tzset. POSIX offsets have the opposite sign to UTC
+            offsets: CST-8 means China Standard Time (UTC+8).
+
+    config M5_CLOCK_TIMEZONE_LABEL
+        string "Timezone display label"
+        default "UTC+8"
+
+    config M5_CLOCK_NTP_SERVER
+        string "Primary NTP server"
+        default "ntp.aliyun.com"
+
+    config M5_CLOCK_NTP_SERVER_BACKUP
+        string "Backup NTP server"
+        default "pool.ntp.org"
+endmenu

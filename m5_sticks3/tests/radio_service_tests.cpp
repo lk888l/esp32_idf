@@ -78,6 +78,15 @@ void common_checks(Service& service)
 {
     check(cli("status").string("error") == "unavailable", "no commands before lifecycle fully starts");
     service.process();
+    check(cli("clock").number("valid") == 0 && cli("clock status").string("zone") == "UTC+8", "clock starts unsynchronized");
+    check(cli("help clock").ok() && cli("capabilities").number("clock") == 1, "clock discoverable on USB");
+    check(cli("clock sync").string("error") == "wifi_not_connected", "offline sync rejected");
+    check(invoke(R"({"v":1,"id":1,"op":"clock.sync","token":"11111111111111111111111111111111","extra":true})").string("error") == "unknown_field", "strict clock sync schema");
+#ifndef M5_TEST_NO_RADIOS
+    check(invoke(R"({"v":1,"id":1,"op":"clock.status"})", fake::http, 512).ok(), "clock query fits radio response");
+    check(invoke(R"({"v":1,"id":1,"op":"clock.sync"})", fake::http).string("error") == "unauthorized", "radio sync requires token");
+    check(invoke(R"({"v":1,"id":1,"op":"clock.sync"})", fake::ble).string("error") == "unauthorized", "BLE sync requires token");
+#endif
     for (const auto* command : {"help", "help wifi", "help ble", "help protocol", "status", "capabilities", "wifi status", "ble status", "wifi saved", "ble saved", "ble bonds", "traffic"})
         check(cli(command).ok(), "documented query succeeds");
     for (const auto* topic : {"wifi", "ble", "protocol"}) {

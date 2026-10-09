@@ -108,6 +108,13 @@ const char* compile(const char* line, uint32_t id, char* json, size_t capacity)
     } else if (first == "status" || first == "ping" || first == "traffic" || first == "capabilities") {
         if (args.count != 1) return "usage";
         op(first);
+    } else if (first == "clock") {
+        if (args.count == 1 || (args.count == 2 && args.at(1) == "status")) op("clock.status");
+        else if (args.count == 2 && args.at(1) == "sync") op("clock.sync");
+        else return "usage";
+    } else if (first == "ntp") {
+        if (args.count != 1) return "usage";
+        op("clock.sync");
     } else if (first == "command") {
         uint32_t ticket;
         if (args.count != 2 || !unsigned_number(args.at(1), ticket) || ticket == 0) return "invalid_ticket";

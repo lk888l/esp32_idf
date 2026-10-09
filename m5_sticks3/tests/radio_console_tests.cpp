@@ -31,6 +31,11 @@ WifiCredentials wifi(const char* name)
 }
 void test_commands()
 {
+    check(compile("clock") == R"({"v":1,"id":7,"op":"clock.status"})", "clock shorthand");
+    check(compile("clock status") == compile("clock"), "clock query");
+    check(compile("clock sync") == R"({"v":1,"id":7,"op":"clock.sync"})" &&
+          compile("ntp") == compile("clock sync"), "manual sync aliases");
+    rejects("clock sync extra"); rejects("clock set"); rejects("ntp extra");
     check(compile("wifi connect \"My network\" \"password !\"") ==
         R"({"v":1,"id":7,"op":"wifi.connect","ssid":"My network","password":"password !","remember":true})", "quoted Wi-Fi command");
     check(compile("wifi connect '开放网络' '' --temporary").find(R"("password":"","remember":false)") != std::string::npos,

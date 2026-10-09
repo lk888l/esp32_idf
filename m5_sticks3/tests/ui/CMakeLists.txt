@@ -21,3 +21,10 @@ target_include_directories(debug_ui_tests PRIVATE ../ui_stubs ../../components/d
     ../../components/connectivity/include ../../components/app_modules/src)
 target_link_libraries(debug_ui_tests PRIVATE lvgl m)
 add_test(NAME debug_ui_tests COMMAND debug_ui_tests)
+
+add_executable(clock_ui_tests ../clock_ui_tests.cpp ../../components/app_modules/src/clock_ui.cpp)
+target_compile_features(clock_ui_tests PRIVATE cxx_std_20)
+target_compile_options(clock_ui_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(clock_ui_tests PRIVATE ../ui_stubs ../../components/clock/include ../../components/app_modules/src)
+target_link_libraries(clock_ui_tests PRIVATE lvgl m)
+add_test(NAME clock_ui_tests COMMAND clock_ui_tests)

@@ -25,6 +25,13 @@ target_include_directories(connectivity_host_tests PRIVATE
 )
 
 enable_testing()
+add_executable(clock_service_tests clock_service_tests.cpp ../components/clock/src/clock_service.cpp)
+target_compile_features(clock_service_tests PRIVATE cxx_std_20)
+target_compile_options(clock_service_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(clock_service_tests PRIVATE radio_service_stubs ../components/connectivity/include
+    ../components/clock/include)
+target_link_options(clock_service_tests PRIVATE -Wl,--wrap=time)
+add_test(NAME clock_service_tests COMMAND clock_service_tests)
 add_executable(ble_gateway_tests ble_gateway_tests.cpp ../components/connectivity/src/ble_gateway.cpp)
 target_compile_features(ble_gateway_tests PRIVATE cxx_std_20)
 target_compile_options(ble_gateway_tests PRIVATE -Wall -Wextra -Werror)
@@ -60,10 +67,11 @@ if(EXISTS "${M5_HOST_IDF_PATH}/components/json/cJSON/cJSON.c")
             ../components/connectivity/src/connectivity_service.cpp
             ../components/connectivity/src/local_console_protocol.cpp
             ../components/connectivity/src/ble_gateway.cpp
+            ../components/clock/src/clock_service.cpp
             ../components/connectivity/src/ble_gateway_protocol.cpp)
         target_compile_features(${test_target} PRIVATE cxx_std_20)
         target_compile_options(${test_target} PRIVATE -Wall -Wextra -Werror)
-        target_include_directories(${test_target} PRIVATE radio_service_stubs ../components/connectivity/include)
+        target_include_directories(${test_target} PRIVATE radio_service_stubs ../components/connectivity/include ../components/clock/include)
         target_link_libraries(${test_target} PRIVATE radio_test_json)
         add_test(NAME ${test_target} COMMAND ${test_target})
     endforeach()
@@ -109,7 +117,7 @@ add_test(NAME infrared_protocol_tests COMMAND infrared_protocol_tests)
 
 option(M5_HOST_SANITIZERS "Enable host AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(M5_HOST_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    foreach(test_target ble_gateway_tests ble_gatt_client_tests app_host_tests connectivity_host_tests radio_console_tests ble_bond_store_tests
+    foreach(test_target clock_service_tests ble_gateway_tests ble_gatt_client_tests app_host_tests connectivity_host_tests radio_console_tests ble_bond_store_tests
                         bsp_power_tests audio_dsp_tests infrared_protocol_tests)
         target_compile_options(${test_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${test_target} PRIVATE -fsanitize=address,undefined)

@@ -5,6 +5,7 @@
 #include "ble_transport.hpp"
 #include "serial_console.hpp"
 #include "ble_gateway_protocol.hpp"
+#include "clock_service.hpp"
 
 #include <array>
 #include <atomic>
@@ -219,6 +220,7 @@ struct Service::Impl {
     WifiTransport wifi;
     BleTransport ble;
     SerialConsole console;
+    clock_service::Service clock;
     Settings settings{};
     RadioMemory memory{};
     WifiCredentials current_wifi{};
@@ -688,15 +690,17 @@ struct Service::Impl {
             char topic[16]{};
             if (get("topic") && !copy_string(get("topic"), topic, sizeof(topic))) { fail("invalid_topic"); return; }
             const char* help = nullptr;
-            if (!topic[0]) help = "help [wifi|ble|gatt|protocol]; status; ping; traffic; capabilities; command TICKET. Quote names/passwords with spaces. No device input echo/history.";
+            if (!topic[0]) help = "help [wifi|ble|gatt|clock|protocol]; status; clock [status|sync]; ntp; ping; traffic; capabilities; command TICKET. Quote names/passwords with spaces. No device input echo/history.";
             else if (!strcmp(topic, "wifi")) help = "wifi status|scan|results [INDEX]|saved [SLOT]|on|off|disconnect|reconnect|remember; wifi connect SSID PASSWORD [--remember|--temporary]; wifi use SLOT; wifi forget SLOT|all. Empty password: \"\". Default: remember after DHCP; 4 stable slots (0..3).";
             else if (!strcmp(topic, "ble")) help = "ble status|scan|results [INDEX]|peer [INDEX]|saved [SLOT]|bonds [INDEX]|on|off|disconnect|reconnect|remember; ble connect ADDRESS TYPE [--remember|--temporary]; ble use SLOT; ble forget SLOT|all; ble unpair ADDRESS TYPE|all. TYPE: public/random/public-id/random-id (0..3). Forget removes profile; unpair removes security keys.";
             else if (!strcmp(topic, "protocol")) help = "Input: CLI or one API v1 JSON object per LF/CRLF (JSON <=256 bytes). Output: RS (0x1e), JSON, LF; ignore logs outside records. accepted + ticket means queued; command TICKET reports applied/error. Poll wifi/ble status for actual link and memory result. Physical USB is trusted; radio mutations require token. Tickets expire after 16 accepted commands or reboot.";
             else if (!strcmp(topic, "gatt")) help = "gatt status; gatt services|mtu|pair GENERATION; gatt characteristics|descriptors GENERATION HANDLE END; gatt read GENERATION HANDLE; gatt write GENERATION HANDLE HEX; gatt subscribe GENERATION CCCD MODE (0=off,1=notify,2=indicate); gatt result TICKET [INDEX [OFFSET]]; gatt events GENERATION [AFTER]. Poll result until complete/failed; generation comes from status.";
+            else if (!strcmp(topic, "clock")) help = "clock [status]: local time/date, timezone, SNTP state and sync age. clock sync / ntp: request SNTP over connected Wi-Fi STA; poll clock status for success. Auto-sync on connection and every hour; offline time keeps ticking. Radio clock.sync requires token. Requests coalesce; retry cooldown 10 s.";
             else { fail("invalid_topic"); return; }
             built = cJSON_AddStringToObject(response.get(), "help", help) != nullptr;
         } else if (op == "capabilities") {
             number("api", 1); number("request_bytes", kMaxRequestBytes);
+            number("clock", 1);
             number("response_bytes", capacity - 1); number("memory_slots", kMemorySlots);
             number("command_history", CommandHistory::capacity); number("queue_capacity", kCommandCapacity);
 #if CONFIG_M5_CONNECTIVITY_WIFI_ENABLED
@@ -761,6 +765,30 @@ struct Service::Impl {
                 number("index", index); string("address", data.bonds[index].address);
                 number("address_type", data.bonds[index].address_type);
             } else if (index != 0) { fail("invalid_index"); return; }
+        } else if (op == "clock.status") {
+            const auto data = clock_service::snapshot();
+            string("state", clock_service::state_name(data.state));
+            number("valid", data.valid); number("online", data.online); number("synced", data.synced);
+            string("time", data.time); string("date", data.date); string("weekday", data.weekday);
+            string("timezone", clock_service::timezone()); string("zone", clock_service::timezone_label());
+            number("epoch", data.epoch); number("last_sync_epoch", data.last_sync_epoch);
+            number("sync_age_s", data.sync_age_s); number("sync_count", data.sync_count);
+            number("interval_s", clock_service::sync_interval_s()); number("error", data.error);
+        } else if (op == "clock.sync") {
+            char token[33]{};
+            if (origin != Origin::serial && (!copy_string(get("token"), token, sizeof(token)) ||
+                !constant_time_equal(token, settings.token))) { fail("unauthorized"); return; }
+            for (const auto* field = root->child; field; field = field->next) {
+                const std::string_view name(field->string);
+                if (name != "v" && name != "id" && name != "op" && name != "token") {
+                    fail("unknown_field"); return;
+                }
+            }
+            const auto result = clock_service::request_sync();
+            if (result != ESP_OK) {
+                fail(result == ESP_ERR_INVALID_STATE ? "wifi_not_connected" : "busy"); return;
+            }
+            string("result", "requested");
         } else if (op == "ping") {
             string("reply", "pong");
         } else if (op == "echo") {
@@ -960,6 +988,8 @@ esp_err_t Service::initialize()
     result = esp_event_loop_create_default();
     if (result == ESP_OK) self.event_loop_owned = true;
     else if (result != ESP_ERR_INVALID_STATE) return result;
+    result = self.clock.initialize();
+    if (result != ESP_OK) return result;
     uint8_t mac[6]{};
     result = esp_read_mac(mac, ESP_MAC_WIFI_STA);
     if (result != ESP_OK) return result;
@@ -1018,6 +1048,7 @@ void Service::process()
                  static_cast<unsigned long>(command.id), esp_err_to_name(result));
     }
     self.process_memory();
+    self.clock.process(self.wifi.snapshot().state == WifiState::connected);
     self.update();
 }
 
@@ -1043,6 +1074,7 @@ esp_err_t Service::deinitialize()
         if (result != ESP_OK) return result;
         self.wifi_attempted = self.wifi_started = false;
     }
+    self.clock.deinitialize();
     if (self.event_loop_owned) {
         const esp_err_t result = esp_event_loop_delete_default();
         if (result != ESP_OK) return result;
