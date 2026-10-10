@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "src/clock_service.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES esp_netif esp_timer
+    REQUIRES esp_netif esp_timer esp_system
 )

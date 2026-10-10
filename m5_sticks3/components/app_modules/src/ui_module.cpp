@@ -26,6 +26,7 @@
 #include "peripheral_ui.hpp"
 #include "debug_ui.hpp"
 #include "clock_ui.hpp"
+#include "sleep_ui.hpp"
 #include "motion_runtime.hpp"
 #include "motion_state.hpp"
 #include "wave_generator.hpp"
@@ -71,6 +72,7 @@ enum class Page : uint8_t {
     peripheral,
     debug,
     clock,
+    sleep,
 };
 
 using AnimExec = void (*)(void*, int32_t);
@@ -258,11 +260,12 @@ public:
             radio_smoke_timer_ = nullptr;
         }
 #endif
-        if ((current_page_ == Page::radio || current_page_ == Page::peripheral || current_page_ == Page::debug || current_page_ == Page::clock) && menu_screen_) lv_screen_load(menu_screen_);
+        if ((current_page_ == Page::radio || current_page_ == Page::peripheral || current_page_ == Page::debug || current_page_ == Page::clock || current_page_ == Page::sleep) && menu_screen_) lv_screen_load(menu_screen_);
         radio_ui_.close();
         peripheral_ui_.close();
         debug_ui_.close();
         clock_ui_.close();
+        sleep_ui_.close();
         request_motion_enabled(false);
         auto& generator = wave::Generator::instance();
         if (generator.initialized() && generator.enabled()) {
@@ -304,6 +307,10 @@ public:
 
     void key1()
     {
+        if (current_page_ == Page::sleep) {
+            if (sleep_ui_.back()) show_menu();
+            return;
+        }
         if (current_page_ == Page::debug) { debug_ui_.next(); return; }
         if (current_page_ == Page::peripheral) {
             peripheral_ui_.next();
@@ -355,6 +362,9 @@ public:
     void key2(bool long_press)
     {
         switch (current_page_) {
+        case Page::sleep:
+            sleep_ui_.select(long_press);
+            break;
         case Page::clock:
             if (clock_ui_.select(long_press)) show_menu();
             break;
@@ -664,6 +674,19 @@ private:
                                   !std::strcmp(command, "tdo-high") ? GPIO_PULLUP_ONLY : GPIO_FLOATING;
                 gpio_set_pull_mode(static_cast<gpio_num_t>(debug_probe::kTdo), pull);
             }
+        } else if (!std::strcmp(command, "sleep")) {
+            show_menu();
+            selected_ = 14;
+            show_sleep();
+        } else if (!std::strcmp(command, "sleep-mode")) {
+            if (current_page_ == Page::sleep) sleep_ui_.select(false);
+        } else if (!std::strcmp(command, "sleep-start")) {
+            if (current_page_ == Page::sleep) sleep_ui_.select(true);
+        } else if (!std::strcmp(command, "sleep-test")) {
+            show_menu();
+            selected_ = 14;
+            show_sleep();
+            sleep_ui_.start_for_test(5);
         } else if (!std::strcmp(command, "next")) {
             key1();
         } else if (!std::strcmp(command, "select")) {
@@ -728,6 +751,8 @@ private:
             peripheral_ui_.update();
         } else if (current_page_ == Page::clock) {
             clock_ui_.update();
+        } else if (current_page_ == Page::sleep) {
+            sleep_ui_.update();
         }
     }
 
@@ -807,14 +832,14 @@ private:
         start_loop_animation(selector_glow_, anim_border_opa, LV_OPA_20, LV_OPA_70,
                              1100, 1100);
 
-        constexpr std::array<const char*, 14> symbols = {
+        constexpr std::array<const char*, 15> symbols = {
             LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS,
             LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH,
             LV_SYMBOL_VOLUME_MAX, LV_SYMBOL_AUDIO, LV_SYMBOL_WIFI,
-            LV_SYMBOL_USB, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH, LV_SYMBOL_BELL};
-        constexpr std::array<const char*, 14> titles = {
+            LV_SYMBOL_USB, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH, LV_SYMBOL_BELL, LV_SYMBOL_POWER};
+        constexpr std::array<const char*, 15> titles = {
             "MOTION", "AURA", "SYSTEM", "WAVE", "ARCADE", "WIFI", "BLE",
-            "SPEAKER", "MIC", "IR", "USB DAP", "W-DAP", "B-DAP", "CLOCK"};
+            "SPEAKER", "MIC", "IR", "USB DAP", "W-DAP", "B-DAP", "CLOCK", "SLEEP"};
         for (size_t index = 0; index < cards_.size(); ++index) {
             lv_obj_t* card = create_glass_panel(menu_screen_, 31, 148, 72, 72);
             cards_[index] = card;
@@ -1520,7 +1545,7 @@ private:
 
     void update_carousel(bool boot)
     {
-        constexpr std::array<const char*, 14> descriptions = {
+        constexpr std::array<const char*, 15> descriptions = {
             "On-demand 100 Hz VQF",
             "Layered aura animation",
             "Memory and uptime",
@@ -1535,6 +1560,7 @@ private:
             "WiFi SWD / JTAG",
             "BLE SWD / JTAG",
             "WiFi auto-sync clock",
+            "Deep sleep / RTC runs",
         };
         lv_obj_move_foreground(cards_[selected_]);
         for (size_t index = 0; index < cards_.size(); ++index) {
@@ -1623,6 +1649,9 @@ private:
         case 10: show_debug(debug_probe::Mode::usb); return;
         case 11: show_debug(debug_probe::Mode::wifi); return;
         case 12: show_debug(debug_probe::Mode::ble); return;
+        case 14:
+            show_sleep();
+            return;
         case 13:
             current_page_ = Page::clock;
             target = clock_ui_.open();
@@ -1634,6 +1663,15 @@ private:
             break;
         }
         lv_screen_load_anim(target, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, kTransitionMs, 0, false);
+    }
+
+    void show_sleep()
+    {
+        lv_obj_t* target = sleep_ui_.open();
+        if (!target) return;
+        current_page_ = Page::sleep;
+        // The transient screen is deleted on exit; never leave a slide pending.
+        lv_screen_load(target);
     }
 
     void show_debug(debug_probe::Mode mode)
@@ -1669,6 +1707,13 @@ private:
 
     void show_menu()
     {
+        if (current_page_ == Page::sleep) {
+            current_page_ = Page::menu;
+            lv_screen_load(menu_screen_);
+            sleep_ui_.close();
+            update_carousel(false);
+            return;
+        }
         if (current_page_ == Page::clock) {
             current_page_ = Page::menu;
             lv_screen_load(menu_screen_);
@@ -2143,11 +2188,12 @@ private:
     lv_obj_t* wave_screen_ = nullptr;
     lv_obj_t* arcade_screen_ = nullptr;
     lv_obj_t* game_screen_ = nullptr;
-    std::array<lv_obj_t*, 14> cards_{};
+    std::array<lv_obj_t*, 15> cards_{};
     RadioUi radio_ui_{};
     PeripheralUi peripheral_ui_{};
     DebugUi debug_ui_{};
     ClockUi clock_ui_{};
+    SleepUi sleep_ui_{};
     lv_obj_t* selector_glow_ = nullptr;
     lv_obj_t* menu_hint_ = nullptr;
     lv_obj_t* menu_clock_label_ = nullptr;
@@ -2414,6 +2460,14 @@ private:
         if (controller_) {
             if (!lvgl_port_lock(100)) {
                 ESP_LOGE(kTag, "failed to acquire LVGL lock while destroying UI");
+                return false;
+            }
+            // Prevent the refresh timer from observing a deleted active screen
+            // in the gap between object destruction and display removal.
+            const esp_err_t stopped = lvgl_port_stop();
+            if (stopped != ESP_OK && stopped != ESP_ERR_INVALID_STATE) {
+                lvgl_port_unlock();
+                ESP_LOGE(kTag, "failed to stop LVGL: %s", esp_err_to_name(stopped));
                 return false;
             }
             controller_->destroy();

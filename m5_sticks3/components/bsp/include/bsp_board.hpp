@@ -83,6 +83,9 @@ public:
     esp_err_t initialize();
     esp_err_t deinitialize();
     esp_err_t enable_display_power();
+    // Call only after consumers stop and L3B signal pins are isolated.
+    // Retains the ESP32 3.3 V rail; never issues a PM1 shutdown command.
+    esp_err_t prepare_l2_sleep();
     // Explicit persistent request; never changes GPIO0 (charging input) or GPIO1.
     esp_err_t enable_5v_output();
     esp_err_t read_power_status(PowerStatus& status);
@@ -110,12 +113,14 @@ private:
     esp_err_t read_power_status_locked(PowerStatus& status);
     esp_err_t ensure_5v_locked(bool& enabled_by_us);
     esp_err_t set_speaker_locked(bool enabled);
+    esp_err_t suspend_motion_locked();
     esp_err_t deinitialize_locked();
 
     StaticSemaphore_t power_mutex_storage_{};
     SemaphoreHandle_t power_mutex_ = nullptr;
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     i2c_master_dev_handle_t pm1_ = nullptr;
+    i2c_master_dev_handle_t sleep_sensor_ = nullptr;
     std::atomic<bool> initialized_{false};
     std::atomic<bool> ir_receiver_active_{false};
     bool speaker_enabled_ = false;

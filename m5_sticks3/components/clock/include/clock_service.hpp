@@ -11,7 +11,7 @@ struct Snapshot {
     State state = State::stopped;
     bool online = false;
     bool valid = false;
-    bool synced = false; // A successful SNTP response in this boot.
+    bool synced = false; // SNTP established this RTC timeline, including deep-sleep wakes.
     int64_t epoch = 0;
     int64_t last_sync_epoch = 0;
     int64_t sync_age_s = -1;
@@ -44,6 +44,10 @@ private:
 // ESP_OK means requested, not synchronized. Poll snapshot() for success.
 esp_err_t request_sync();
 Snapshot snapshot();
+// Call before tearing down the clock service and entering ESP32 deep sleep.
+// Saves synchronization metadata in RTC memory. An unsynchronized clock stays
+// invalid after wake; ordinary resets never restore this saved validity.
+void prepare_for_sleep();
 const char* state_name(State state);
 const char* timezone();
 const char* timezone_label();

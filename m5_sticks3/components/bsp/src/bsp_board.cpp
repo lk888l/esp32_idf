@@ -13,6 +13,9 @@ namespace {
 constexpr char kTag[] = "board";
 constexpr uint8_t kPowerConfig = 0x06;
 constexpr uint8_t kBoost = 1U << 3;
+constexpr uint8_t kCore3v3 = 1U << 1;
+constexpr uint8_t kImu = 1U << 2;
+constexpr uint8_t kStatusLed = 1U << 4;
 constexpr uint8_t kGpioFunction = 0x16;
 constexpr uint8_t kGpioMode = 0x10;
 constexpr uint8_t kGpioOutput = 0x11;
@@ -99,6 +102,21 @@ esp_err_t Board::initialize()
             vTaskDelay(pdMS_TO_TICKS(10));
             result = update_pm1_register(0x09, 0, 0x0F);
         }
+        if (result != ESP_OK) {
+            // Recover a retained PM1 rail/idle state without depending on a
+            // successful read first. Stock rails on; external 5 V boost off.
+            // No other firmware component owns a nondefault charger setting.
+            ESP_LOGW(kTag, "recovering PM1 normal rails without readback");
+            result = write_pm1_register(kPowerConfig, 0x17);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            if (result == ESP_OK) result = update_pm1_register(0x09, 0, 0x0F);
+        }
+    }
+    if (result == ESP_OK) {
+        // PM1 registers survive ESP32 deep sleep. Restore the normal L1/L2
+        // rails before BMI270 initialization, preserving charging and boost.
+        result = update_pm1_register(kPowerConfig, kCore3v3 | kImu | kStatusLed, 0);
+        if (result == ESP_OK) vTaskDelay(pdMS_TO_TICKS(10));
     }
     if (result == ESP_OK) {
         // StickS3 routes the charger's active-low CHG_STAT signal to PM1 GPIO0.
@@ -140,6 +158,109 @@ esp_err_t Board::enable_display_power()
                         "failed to enable LCD L3B rail");
     vTaskDelay(pdMS_TO_TICKS(100));
     return ESP_OK;
+}
+
+esp_err_t Board::prepare_l2_sleep()
+{
+    if (!power_mutex_) return ESP_ERR_INVALID_STATE;
+    PowerLock lock(power_mutex_);
+    if (!initialized_ || !pm1_ || ir_power_users_ || ir_receiver_active_)
+        return ESP_ERR_INVALID_STATE;
+
+    uint8_t power = 0, output = 0, idle = 0;
+    ESP_RETURN_ON_ERROR(read_pm1_register(kPowerConfig, power), kTag, "save power config");
+    ESP_RETURN_ON_ERROR(read_pm1_register(kGpioOutput, output), kTag, "save GPIO outputs");
+    ESP_RETURN_ON_ERROR(read_pm1_register(0x09, idle), kTag, "save PM1 idle config");
+    // BMI270 shares the pulled-up I2C bus without an isolator. Retain its VDDIO
+    // on L1 and enter suspend instead of back-feeding an unpowered sensor.
+    esp_err_t result = suspend_motion_locked();
+    if (result == ESP_OK) result = set_speaker_locked(false);
+    // The LCD/audio L3B rail is driven by PM1 GPIO2, not PWR_CFG.
+    if (result == ESP_OK) result = update_pm1_register(kGpioOutput, 0, 1U << 2);
+    if (result == ESP_OK) result = update_pm1_register(kGpioFunction, 0, 0x30);
+    if (result == ESP_OK) result = update_pm1_register(kGpioDrive, 0, 1U << 2);
+    if (result == ESP_OK) result = update_pm1_register(kGpioMode, 1U << 2, 0);
+    // Disable any watchdog/countdown retained from an earlier firmware so it
+    // cannot reset or power off L2 while ESP32 is asleep.
+    if (result == ESP_OK) result = write_pm1_register(0x0A, 0);
+    if (result == ESP_OK) result = write_pm1_register(0x3C, 0);
+    if (result == ESP_OK) result = update_pm1_register(kPowerConfig, kCore3v3 | kImu, kBoost | kStatusLed);
+    uint8_t check = 0;
+    if (result == ESP_OK) result = read_pm1_register(kPowerConfig, check);
+    if (result == ESP_OK && ((check & 0x1E) != (kCore3v3 | kImu) || (check & 1) != (power & 1))) {
+        ESP_LOGE(kTag, "L2 power readback=0x%02x before=0x%02x", check, power);
+        result = ESP_ERR_INVALID_STATE;
+    }
+    if (result == ESP_OK) result = read_pm1_register(kGpioOutput, check);
+    if (result == ESP_OK && (check & ((1U << 2) | kSpeakerBit))) {
+        ESP_LOGE(kTag, "L2 GPIO output readback=0x%02x", check);
+        result = ESP_ERR_INVALID_STATE;
+    }
+    if (result == ESP_OK) result = read_pm1_register(0x0A, check);
+    if (result == ESP_OK && check) {
+        ESP_LOGE(kTag, "L2 watchdog readback=0x%02x", check);
+        result = ESP_ERR_INVALID_STATE;
+    }
+    if (result == ESP_OK) result = read_pm1_register(0x3C, check);
+    if (result == ESP_OK && check) {
+        ESP_LOGE(kTag, "L2 timer readback=0x%02x", check);
+        result = ESP_ERR_INVALID_STATE;
+    }
+    // Sleep the PM1 itself after two seconds without I2C; L2 stays powered.
+    if (result == ESP_OK) result = write_pm1_register(0x09, (idle & 0xF0) | 2);
+    if (result != ESP_OK) {
+        // A failed ACK can follow an applied write. Restore a powered, muted
+        // state for the recovery boot, always retaining the ESP32 rail.
+        write_pm1_register(0x09, idle & 0xF0);
+        write_pm1_register(kPowerConfig, power | kCore3v3);
+        write_pm1_register(kGpioOutput, output & ~kSpeakerBit);
+        return result;
+    }
+    boost_owned_ = output_pinned_ = false;
+    ESP_LOGI(kTag, "L2 ready: PM1 power=0x%02x (ESP32 retained, charging unchanged)",
+             static_cast<unsigned>((power | kCore3v3 | kImu) & ~(kBoost | kStatusLed)));
+    return ESP_OK;
+}
+
+esp_err_t Board::suspend_motion_locked()
+{
+    const i2c_device_config_t config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = kBmi270Address,
+        .scl_speed_hz = 100000,
+        .scl_wait_us = 0,
+        .flags = {.disable_ack_check = false},
+    };
+    if (sleep_sensor_) {
+        ESP_RETURN_ON_ERROR(i2c_master_bus_rm_device(sleep_sensor_), kTag, "pending BMI270 cleanup");
+        sleep_sensor_ = nullptr;
+    }
+    ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(i2c_bus_, &config, &sleep_sensor_), kTag,
+                        "cannot access BMI270 for suspend");
+    const auto read = [&](uint8_t reg, uint8_t& value) {
+        return i2c_master_transmit_receive(sleep_sensor_, &reg, 1, &value, 1, 100);
+    };
+    const auto write = [&](uint8_t reg, uint8_t value) {
+        const std::array<uint8_t, 2> data{reg, value};
+        return i2c_master_transmit(sleep_sensor_, data.data(), data.size(), 100);
+    };
+    uint8_t value = 0;
+    esp_err_t result = read(0x00, value);
+    if (result == ESP_OK && value != 0x24) result = ESP_ERR_NOT_FOUND;
+    if (result == ESP_OK) result = write(0x7D, 0); // Sensors and auxiliary interface off.
+    vTaskDelay(pdMS_TO_TICKS(2)); // BMI270 requires >=450 us between power writes.
+    if (result == ESP_OK) result = read(0x7C, value);
+    if (result == ESP_OK) result = write(0x7C, value | 1); // Advanced power save.
+    vTaskDelay(pdMS_TO_TICKS(2));
+    if (result == ESP_OK) result = read(0x7D, value);
+    if (result == ESP_OK && value) result = ESP_ERR_INVALID_STATE;
+    if (result == ESP_OK) result = read(0x7C, value);
+    if (result == ESP_OK && !(value & 1)) result = ESP_ERR_INVALID_STATE;
+    const esp_err_t cleanup = i2c_master_bus_rm_device(sleep_sensor_);
+    if (cleanup == ESP_OK) sleep_sensor_ = nullptr;
+    if (result == ESP_OK) result = cleanup;
+    if (result != ESP_OK) ESP_LOGE(kTag, "BMI270 suspend failed: %s", esp_err_to_name(result));
+    return result;
 }
 
 esp_err_t Board::set_speaker_locked(bool enabled)
@@ -313,6 +434,10 @@ esp_err_t Board::deinitialize_locked()
     // Never remove the shared I2C bus while an IR consumer still owns a lease.
     if (ir_power_users_ || ir_receiver_active_) return ESP_ERR_INVALID_STATE;
     initialized_ = false;
+    if (sleep_sensor_) {
+        ESP_RETURN_ON_ERROR(i2c_master_bus_rm_device(sleep_sensor_), kTag, "failed to release BMI270");
+        sleep_sensor_ = nullptr;
+    }
     if (pm1_) {
         ESP_RETURN_ON_ERROR(set_speaker_locked(false), kTag, "failed to mute during shutdown");
         if (boost_owned_) {

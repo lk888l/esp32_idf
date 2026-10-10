@@ -18,6 +18,7 @@
 - `AURA` 页面：低速多层环形/粒子动画，用于展示偏重质量的动画风格
 - `SYSTEM` 页面：Wi-Fi IP、BLE 状态、堆内存、PSRAM 和运行时间
 - `CLOCK` 页面：北京时间、日期/星期、联网自动校时、每小时刷新、断网继续走时
+- `SLEEP` 页面：L2 深度休眠、保持 RTC 计时、按键或定时唤醒
 - `WIFI` / `BLE` 页面：附近设备扫描、RSSI / 链路分析、运行时连接与开关、应用流量与 echo 回显
 - 双按键 Wi-Fi 密码编辑、设备热点密码查看、BLE 主动连接与主服务 UUID 分析
 - `ARCADE` 页面：三款针对 135×240 小屏和双按键设计的小游戏
@@ -102,6 +103,14 @@ KEY2 查看详情；Wi-Fi 可输入密码连接，BLE 可连接可连接的广�
 USB 串口支持 `clock` / `clock status` 查询、`clock sync` / `ntp` 手动校时、
 `help clock` 查看帮助。时区、接口、复现测试和无电池 RTC 的限制见
 [时钟说明](docs/clock.md)。
+
+## 深度休眠
+
+主菜单第 15 张 **SLEEP** 卡片：短按 KEY2 选择按键唤醒或 5 分钟/30 分钟/1 小时
+定时唤醒，长按 KEY2 后松开进入 3 秒倒计时，KEY1 可取消。休眠时屏幕和外设关闭，
+ESP32 的 RTC 继续计时；KEY1/KEY2 可随时唤醒，回到主菜单。已经校准的时间在
+离线唤醒后仍可显示。电源键关机或完全断电后需重新联网校时。详见
+[深度休眠说明](docs/deep-sleep.md)。
 
 ## 小游戏操作
 
@@ -200,7 +209,7 @@ idf.py -B build/hw-smoke -p /dev/ttyACM0 flash monitor
 验证完成后重新烧录 `build/codex-idf` 中的正式固件。
 
 菜单动画回归使用 `M5_STICKS3_DAP_SMOKE_TEST=ON` 的串口测试入口。它会循环全部
-14 张卡片、快速连按验证排队切换，并进入/返回 AURA、SYSTEM 和 CLOCK；默认固件不含此入口。
+15 张卡片、快速连按验证排队切换，并进入/返回 AURA、SYSTEM、CLOCK 和 SLEEP；默认固件不含此入口。
 在已加载 IDF 的容器中构建并烧录：
 
 ```bash

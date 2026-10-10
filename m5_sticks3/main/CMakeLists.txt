@@ -7,5 +7,6 @@ idf_component_register(
         app
         app_modules
         freertos
+        sleep
 )
 

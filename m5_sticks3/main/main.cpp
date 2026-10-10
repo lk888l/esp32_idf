@@ -2,6 +2,8 @@
 #include "app_modules.hpp"
 #include "button_event_bus.hpp"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "sleep_service.hpp"
 
 #include <memory>
 #include <utility>
@@ -12,6 +14,7 @@
 extern "C" void app_main(void)
 {
     constexpr char tag[] = "main";
+    sleep_service::restore_after_wake();
     app::ButtonEventBus button_events;
     app::AppManager manager;
 
@@ -58,6 +61,16 @@ extern "C" void app_main(void)
     while (true) {
         button_events.dispatch_pending();
         manager.process_all();
+        uint32_t sleep_seconds = 0;
+        if (sleep_service::take_request(sleep_seconds)) {
+            sleep_service::enter_deep_sleep(manager, sleep_seconds);
+            if (!manager.is_running()) {
+                // A failed teardown or power transaction cannot leave a half
+                // stopped application running. Boot restores rails and pads.
+                ESP_LOGW(tag, "restarting after unsuccessful sleep preparation");
+                esp_restart();
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

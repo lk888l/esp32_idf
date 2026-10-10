@@ -1,5 +1,6 @@
 #include "clock_service.hpp"
 #include "esp_netif_sntp.h"
+#include "esp_system.h"
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -89,6 +90,59 @@ int main()
     check(!fake::sntp_active && snapshot().error == ESP_FAIL, "start failure releases allocation");
     fake::sntp_start_error = ESP_OK; fake::now += 60'000'000; service.process(true);
     check(snapshot().state == State::syncing && fake::sntp_active, "automatic recovery from start failure");
+
+    receive(1791475200);
+    fake::now += 40'000'000; wall_time += 40;
+    const auto before_sleep = snapshot();
+    prepare_for_sleep();
+    service.deinitialize();
+    wall_time += 120; fake::now = 0; fake::reset_reason = ESP_RST_DEEPSLEEP;
+    check(service.initialize() == ESP_OK, "initialize after a deep-sleep wake");
+    service.process(false);
+    value = snapshot();
+    check(value.valid && value.synced && !value.online && value.state == State::waiting_wifi &&
+          value.sync_count == before_sleep.sync_count && value.last_sync_epoch == before_sleep.last_sync_epoch &&
+          value.epoch == before_sleep.epoch + 120 && value.sync_age_s == before_sleep.sync_age_s + 120,
+          "RTC wake retains offline time, sync metadata, and sleep duration in age");
+    wall_time += 20; fake::now += 20'000'000;
+    check(snapshot().sync_age_s == before_sleep.sync_age_s + 140, "retained age advances on the new boot timer");
+    prepare_for_sleep(); service.deinitialize();
+    wall_time += 180; fake::now = 0;
+    check(service.initialize() == ESP_OK && snapshot().valid &&
+          snapshot().sync_age_s == before_sleep.sync_age_s + 320, "consecutive sleeps preserve one RTC timeline");
+    service.process(true);
+    fake::now += 60'000'000; wall_time += 60; service.process(true);
+    check(snapshot().state == State::retrying && snapshot().valid,
+          "wake triggers network refresh and reports timeout without losing retained time");
+    receive(wall_time);
+    check(snapshot().sync_age_s == 0 && snapshot().sync_count == before_sleep.sync_count + 1 &&
+          snapshot().state == State::synced, "new SNTP response resets retained age and advances count");
+
+    prepare_for_sleep(); service.deinitialize();
+    fake::reset_reason = ESP_RST_SW; fake::now = 0;
+    check(service.initialize() == ESP_OK && !snapshot().valid && !snapshot().synced &&
+          snapshot().sync_count == 0, "software restart ignores saved sleep validity");
+    service.deinitialize(); fake::reset_reason = ESP_RST_DEEPSLEEP;
+    check(service.initialize() == ESP_OK && !snapshot().valid,
+          "deep-sleep reason alone cannot validate an unsynchronized RTC");
+    prepare_for_sleep(); service.deinitialize(); wall_time += 120;
+    check(service.initialize() == ESP_OK && !snapshot().valid,
+          "sleep before initial SNTP retains the placeholder");
+
+    service.process(true); receive(1791475200);
+    prepare_for_sleep(); service.deinitialize(); --wall_time; fake::now = 0;
+    check(service.initialize() == ESP_OK && !snapshot().valid,
+          "backwards RTC time rejects synchronization metadata");
+    service.process(true); receive(1791475200);
+    prepare_for_sleep(); service.deinitialize(); wall_time = 0; fake::now = 0;
+    check(service.initialize() == ESP_OK && !snapshot().valid,
+          "lost RTC time cannot restore synchronization validity");
+    service.process(true); receive(1791475200);
+    prepare_for_sleep(); service.deinitialize(); fake::reset_reason = ESP_RST_POWERON;
+    check(service.initialize() == ESP_OK && !snapshot().valid,
+          "power-on reset requires fresh SNTP even with sane wall time and saved metadata");
+    service.process(true); receive(4102444800);
+    check(!snapshot().valid, "implausible SNTP dates are rejected");
     service.deinitialize();
     std::cout << "Clock service checks passed\n";
 }

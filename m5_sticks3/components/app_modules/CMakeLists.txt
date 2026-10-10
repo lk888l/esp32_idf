@@ -11,6 +11,7 @@ idf_component_register(
         "src/peripheral_ui.cpp"
         "src/debug_ui.cpp"
         "src/clock_ui.cpp"
+        "src/sleep_ui.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -30,6 +31,7 @@ idf_component_register(
         infrared
         debug_probe
         clock
+        sleep
 )
 
 if(M5_STICKS3_HW_SMOKE_TEST)

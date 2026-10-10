@@ -25,8 +25,10 @@ UI 与 USB/HTTP/BLE 从线程安全快照读取时间。网络请求、DNS、备
 服务器切换。`NTP SYNCED` 代表收到过有效响应；`sync_age_s` 可判断时间的新鲜程度。
 
 硬件资料（StickS3 Summary 及 K150 V0.6 原理图）未列出独立电池备份 RTC。
-本实现只使用 ESP32 系统计时，不把上次时间写入 NVS 假装准确恢复；重启/断电后
-需联网成功校时再显示时间。不会清空或修改其他组件的 NVS 数据。
+本实现使用 ESP32 系统计时；通过 **SLEEP** 卡片进入 L2 深度休眠时保留 RTC 供电，
+并在 RTC 内存保存校时元数据。深度休眠唤醒后可离线显示延续的时间，并在重新联网
+后自动校时。普通复位、关机和断电后需重新联网成功校时再显示时间，详见
+[深度休眠说明](deep-sleep.md)。
 
 ## USB 与统一 API
 
@@ -41,7 +43,8 @@ help clock
 HTTP/BLE/USB JSON 均支持 `{"v":1,"id":1,"op":"clock.status"}`，返回 `state`、
 `valid`、`online`、`synced`、`time`、`date`、`weekday`、`timezone`、`zone`、
 `epoch`、`last_sync_epoch`、`sync_age_s`、`sync_count`、`interval_s` 和 `error`。
-`sync_age_s=-1` 表示本次启动尚未成功校时。`epoch` 为 UTC Unix 秒数，显示字符串
+`sync_age_s=-1` 表示尚无有效校时基准；深度休眠唤醒后的值包含休眠时间。
+`epoch` 为 UTC Unix 秒数，显示字符串
 已转换为配置的时区。时间无效时 `epoch=0`，显示字符串为占位符。
 
 手动校时使用 `{"v":1,"id":2,"op":"clock.sync"}`。无线请求需要现有 API token，

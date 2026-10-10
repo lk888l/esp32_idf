@@ -10,6 +10,7 @@
 #include "button_event_bus.hpp"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -42,7 +43,24 @@ private:
 
     void main() override
     {
+        // Consume the wake press. Its release should leave the new boot on the
+        // main menu instead of navigating or opening a card.
+        bool wake_press = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1;
+        TickType_t release_at = 0;
+        bool releasing = false;
         while (!should_exit()) {
+            if (wake_press) {
+                const bool released = gpio_get_level(bsp::kKey1) && gpio_get_level(bsp::kKey2);
+                if (!released) releasing = false;
+                else if (!releasing) {
+                    releasing = true;
+                    release_at = xTaskGetTickCount();
+                } else if (xTaskGetTickCount() - release_at >= kDebounceInterval) {
+                    wake_press = false;
+                }
+                vTaskDelay(kPollInterval);
+                continue;
+            }
             update_button(bsp::kKey1, key1_);
             update_button(bsp::kKey2, key2_);
             vTaskDelay(kPollInterval);

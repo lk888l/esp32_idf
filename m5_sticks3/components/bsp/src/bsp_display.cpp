@@ -282,6 +282,15 @@ esp_err_t Display::deinitialize()
         ledc_update_duty(kBacklightMode, kBacklightChannel);
     }
     if (lv_display_) {
+        // A synchronous panel command drains pending SPI color transfers while
+        // their completion callback and LVGL buffers are still alive.
+        if (panel_) {
+            ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel_, false), kTag,
+                                "failed to stop LCD transfers");
+        }
+        const esp_lcd_panel_io_callbacks_t callbacks{};
+        ESP_RETURN_ON_ERROR(esp_lcd_panel_io_register_event_callbacks(io_, &callbacks, nullptr),
+                            kTag, "failed to detach LCD completion callback");
         ESP_RETURN_ON_ERROR(lvgl_port_remove_disp(lv_display_), kTag,
                             "failed to remove LVGL display");
         lv_display_ = nullptr;

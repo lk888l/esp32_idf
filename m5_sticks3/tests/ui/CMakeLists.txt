@@ -28,3 +28,12 @@ target_compile_options(clock_ui_tests PRIVATE -Wall -Wextra -Werror)
 target_include_directories(clock_ui_tests PRIVATE ../ui_stubs ../../components/clock/include ../../components/app_modules/src)
 target_link_libraries(clock_ui_tests PRIVATE lvgl m)
 add_test(NAME clock_ui_tests COMMAND clock_ui_tests)
+
+add_executable(sleep_ui_tests ../sleep_ui_tests.cpp ../../components/app_modules/src/sleep_ui.cpp)
+target_compile_features(sleep_ui_tests PRIVATE cxx_std_20)
+target_compile_options(sleep_ui_tests PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(sleep_ui_tests PRIVATE M5_STICKS3_DAP_SMOKE_TEST=1)
+target_include_directories(sleep_ui_tests PRIVATE ../ui_stubs ../../components/clock/include
+    ../../components/sleep/include ../../components/app_modules/src)
+target_link_libraries(sleep_ui_tests PRIVATE lvgl m)
+add_test(NAME sleep_ui_tests COMMAND sleep_ui_tests)
