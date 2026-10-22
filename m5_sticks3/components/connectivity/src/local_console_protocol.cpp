@@ -108,6 +108,10 @@ const char* compile(const char* line, uint32_t id, char* json, size_t capacity)
     } else if (first == "status" || first == "ping" || first == "traffic" || first == "capabilities") {
         if (args.count != 1) return "usage";
         op(first);
+    } else if (first == "pc") {
+        if (args.count == 1 || (args.count == 2 && args.at(1) == "status")) op("pc.status");
+        else if (args.count == 2 && args.at(1) == "sample") op("pc.sample");
+        else return "usage";
     } else if (first == "clock") {
         if (args.count == 1 || (args.count == 2 && args.at(1) == "status")) op("clock.status");
         else if (args.count == 2 && args.at(1) == "sync") op("clock.sync");

@@ -31,6 +31,10 @@ WifiCredentials wifi(const char* name)
 }
 void test_commands()
 {
+    check(compile("pc") == R"({"v":1,"id":7,"op":"pc.status"})", "PC shorthand");
+    check(compile("pc status") == compile("pc"), "PC status alias");
+    check(compile("pc sample") == R"({"v":1,"id":7,"op":"pc.sample"})", "PC sample query");
+    rejects("pc on"); rejects("pc sample extra");
     check(compile("clock") == R"({"v":1,"id":7,"op":"clock.status"})", "clock shorthand");
     check(compile("clock status") == compile("clock"), "clock query");
     check(compile("clock sync") == R"({"v":1,"id":7,"op":"clock.sync"})" &&

@@ -4,7 +4,7 @@ idf_component_register(
          "src/ble_gateway.cpp" "src/ble_gatt_client.cpp" "src/ble_gateway_protocol.cpp"
     INCLUDE_DIRS "include"
     REQUIRES app model esp_event esp_netif esp_wifi esp_http_server bt nvs_flash
-             esp_timer esp_system esp_hw_support bootloader_support json debug_probe clock
+             esp_timer esp_system esp_hw_support bootloader_support json debug_probe clock pc_monitor
 )
 
 # The opt-in UI harness owns stdin in this build; never create two readers.

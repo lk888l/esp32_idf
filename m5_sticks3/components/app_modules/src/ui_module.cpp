@@ -27,10 +27,12 @@
 #include "debug_ui.hpp"
 #include "clock_ui.hpp"
 #include "sleep_ui.hpp"
+#include "pc_monitor_ui.hpp"
 #include "motion_runtime.hpp"
 #include "motion_state.hpp"
 #include "wave_generator.hpp"
 #ifdef M5_STICKS3_DAP_SMOKE_TEST
+#include "pc_monitor_service.hpp"
 #include <cstring>
 #include <unistd.h>
 #include "soc/gpio_struct.h"
@@ -73,6 +75,7 @@ enum class Page : uint8_t {
     debug,
     clock,
     sleep,
+    pc_monitor,
 };
 
 using AnimExec = void (*)(void*, int32_t);
@@ -260,12 +263,13 @@ public:
             radio_smoke_timer_ = nullptr;
         }
 #endif
-        if ((current_page_ == Page::radio || current_page_ == Page::peripheral || current_page_ == Page::debug || current_page_ == Page::clock || current_page_ == Page::sleep) && menu_screen_) lv_screen_load(menu_screen_);
+        if ((current_page_ == Page::radio || current_page_ == Page::peripheral || current_page_ == Page::debug || current_page_ == Page::clock || current_page_ == Page::sleep || current_page_ == Page::pc_monitor) && menu_screen_) lv_screen_load(menu_screen_);
         radio_ui_.close();
         peripheral_ui_.close();
         debug_ui_.close();
         clock_ui_.close();
         sleep_ui_.close();
+        pc_monitor_ui_.close();
         request_motion_enabled(false);
         auto& generator = wave::Generator::instance();
         if (generator.initialized() && generator.enabled()) {
@@ -362,6 +366,9 @@ public:
     void key2(bool long_press)
     {
         switch (current_page_) {
+        case Page::pc_monitor:
+            if (pc_monitor_ui_.select(long_press)) show_menu();
+            break;
         case Page::sleep:
             sleep_ui_.select(long_press);
             break;
@@ -634,6 +641,11 @@ private:
         const auto state = debug_probe::snapshot();
         const auto radio = connectivity::snapshot();
         const auto clock = clock_service::snapshot();
+        const auto pc = pc_monitor::snapshot();
+        ESP_LOGI(kTag, "PC TEST listening=%u received=%u stale=%u age_ms=%lu accepted=%lu seq=%lu error=%d",
+                 unsigned(pc.listening), unsigned(pc.received), unsigned(pc.stale),
+                 static_cast<unsigned long>(pc.age_ms), static_cast<unsigned long>(pc.accepted),
+                 static_cast<unsigned long>(pc.stats.seq), pc.error);
         ESP_LOGI(kTag, "CLOCK TEST state=%s valid=%u online=%u epoch=%lld count=%lu interval=%lu error=%d menu_time=%s",
                  clock_service::state_name(clock.state), unsigned(clock.valid), unsigned(clock.online),
                  static_cast<long long>(clock.epoch), static_cast<unsigned long>(clock.sync_count),
@@ -678,6 +690,10 @@ private:
             show_menu();
             selected_ = 14;
             show_sleep();
+        } else if (!std::strcmp(command, "pc")) {
+            show_menu();
+            selected_ = 15;
+            show_pc_monitor();
         } else if (!std::strcmp(command, "sleep-mode")) {
             if (current_page_ == Page::sleep) sleep_ui_.select(false);
         } else if (!std::strcmp(command, "sleep-start")) {
@@ -753,6 +769,8 @@ private:
             clock_ui_.update();
         } else if (current_page_ == Page::sleep) {
             sleep_ui_.update();
+        } else if (current_page_ == Page::pc_monitor) {
+            pc_monitor_ui_.update();
         }
     }
 
@@ -832,14 +850,14 @@ private:
         start_loop_animation(selector_glow_, anim_border_opa, LV_OPA_20, LV_OPA_70,
                              1100, 1100);
 
-        constexpr std::array<const char*, 15> symbols = {
+        constexpr std::array<const char*, 16> symbols = {
             LV_SYMBOL_GPS, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_SETTINGS,
             LV_SYMBOL_SHUFFLE, LV_SYMBOL_PLAY, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH,
             LV_SYMBOL_VOLUME_MAX, LV_SYMBOL_AUDIO, LV_SYMBOL_WIFI,
-            LV_SYMBOL_USB, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH, LV_SYMBOL_BELL, LV_SYMBOL_POWER};
-        constexpr std::array<const char*, 15> titles = {
+            LV_SYMBOL_USB, LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH, LV_SYMBOL_BELL, LV_SYMBOL_POWER, LV_SYMBOL_BARS};
+        constexpr std::array<const char*, 16> titles = {
             "MOTION", "AURA", "SYSTEM", "WAVE", "ARCADE", "WIFI", "BLE",
-            "SPEAKER", "MIC", "IR", "USB DAP", "W-DAP", "B-DAP", "CLOCK", "SLEEP"};
+            "SPEAKER", "MIC", "IR", "USB DAP", "W-DAP", "B-DAP", "CLOCK", "SLEEP", "PC MON"};
         for (size_t index = 0; index < cards_.size(); ++index) {
             lv_obj_t* card = create_glass_panel(menu_screen_, 31, 148, 72, 72);
             cards_[index] = card;
@@ -1545,7 +1563,7 @@ private:
 
     void update_carousel(bool boot)
     {
-        constexpr std::array<const char*, 15> descriptions = {
+        constexpr std::array<const char*, 16> descriptions = {
             "On-demand 100 Hz VQF",
             "Layered aura animation",
             "Memory and uptime",
@@ -1561,6 +1579,7 @@ private:
             "BLE SWD / JTAG",
             "WiFi auto-sync clock",
             "Deep sleep / RTC runs",
+            "WiFi PC resources",
         };
         lv_obj_move_foreground(cards_[selected_]);
         for (size_t index = 0; index < cards_.size(); ++index) {
@@ -1652,6 +1671,9 @@ private:
         case 14:
             show_sleep();
             return;
+        case 15:
+            show_pc_monitor();
+            return;
         case 13:
             current_page_ = Page::clock;
             target = clock_ui_.open();
@@ -1663,6 +1685,14 @@ private:
             break;
         }
         lv_screen_load_anim(target, LV_SCREEN_LOAD_ANIM_MOVE_LEFT, kTransitionMs, 0, false);
+    }
+
+    void show_pc_monitor()
+    {
+        lv_obj_t* target = pc_monitor_ui_.open();
+        if (!target) return;
+        current_page_ = Page::pc_monitor;
+        lv_screen_load(target);
     }
 
     void show_sleep()
@@ -1707,6 +1737,13 @@ private:
 
     void show_menu()
     {
+        if (current_page_ == Page::pc_monitor) {
+            current_page_ = Page::menu;
+            lv_screen_load(menu_screen_);
+            pc_monitor_ui_.close();
+            update_carousel(false);
+            return;
+        }
         if (current_page_ == Page::sleep) {
             current_page_ = Page::menu;
             lv_screen_load(menu_screen_);
@@ -2188,12 +2225,13 @@ private:
     lv_obj_t* wave_screen_ = nullptr;
     lv_obj_t* arcade_screen_ = nullptr;
     lv_obj_t* game_screen_ = nullptr;
-    std::array<lv_obj_t*, 15> cards_{};
+    std::array<lv_obj_t*, 16> cards_{};
     RadioUi radio_ui_{};
     PeripheralUi peripheral_ui_{};
     DebugUi debug_ui_{};
     ClockUi clock_ui_{};
     SleepUi sleep_ui_{};
+    PcMonitorUi pc_monitor_ui_{};
     lv_obj_t* selector_glow_ = nullptr;
     lv_obj_t* menu_hint_ = nullptr;
     lv_obj_t* menu_clock_label_ = nullptr;

@@ -25,6 +25,20 @@ target_include_directories(connectivity_host_tests PRIVATE
 )
 
 enable_testing()
+add_executable(pc_monitor_tests pc_monitor_tests.cpp ../components/pc_monitor/src/pc_monitor_protocol.cpp)
+target_compile_features(pc_monitor_tests PRIVATE cxx_std_20)
+target_compile_options(pc_monitor_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(pc_monitor_tests PRIVATE ../components/pc_monitor/include)
+add_test(NAME pc_monitor_tests COMMAND pc_monitor_tests)
+
+add_executable(pc_monitor_service_tests pc_monitor_service_tests.cpp
+    ../components/pc_monitor/src/pc_monitor_protocol.cpp ../components/pc_monitor/src/pc_monitor_service.cpp)
+target_compile_features(pc_monitor_service_tests PRIVATE cxx_std_20)
+target_compile_options(pc_monitor_service_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(pc_monitor_service_tests PRIVATE pc_monitor_stubs radio_service_stubs
+    ../components/pc_monitor/include ../components/connectivity/include)
+add_test(NAME pc_monitor_service_tests COMMAND pc_monitor_service_tests)
+set_tests_properties(pc_monitor_service_tests PROPERTIES RESOURCE_LOCK pc_monitor_udp)
 add_executable(clock_service_tests clock_service_tests.cpp ../components/clock/src/clock_service.cpp)
 target_compile_features(clock_service_tests PRIVATE cxx_std_20)
 target_compile_options(clock_service_tests PRIVATE -Wall -Wextra -Werror)
@@ -71,7 +85,7 @@ if(EXISTS "${M5_HOST_IDF_PATH}/components/json/cJSON/cJSON.c")
             ../components/connectivity/src/ble_gateway_protocol.cpp)
         target_compile_features(${test_target} PRIVATE cxx_std_20)
         target_compile_options(${test_target} PRIVATE -Wall -Wextra -Werror)
-        target_include_directories(${test_target} PRIVATE radio_service_stubs ../components/connectivity/include ../components/clock/include)
+        target_include_directories(${test_target} PRIVATE radio_service_stubs ../components/connectivity/include ../components/clock/include ../components/pc_monitor/include)
         target_link_libraries(${test_target} PRIVATE radio_test_json)
         add_test(NAME ${test_target} COMMAND ${test_target})
     endforeach()
@@ -117,7 +131,7 @@ add_test(NAME infrared_protocol_tests COMMAND infrared_protocol_tests)
 
 option(M5_HOST_SANITIZERS "Enable host AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 if(M5_HOST_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    foreach(test_target clock_service_tests ble_gateway_tests ble_gatt_client_tests app_host_tests connectivity_host_tests radio_console_tests ble_bond_store_tests
+    foreach(test_target pc_monitor_tests pc_monitor_service_tests clock_service_tests ble_gateway_tests ble_gatt_client_tests app_host_tests connectivity_host_tests radio_console_tests ble_bond_store_tests
                         bsp_power_tests audio_dsp_tests infrared_protocol_tests)
         target_compile_options(${test_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(${test_target} PRIVATE -fsanitize=address,undefined)

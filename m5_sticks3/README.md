@@ -19,6 +19,7 @@
 - `SYSTEM` 页面：Wi-Fi IP、BLE 状态、堆内存、PSRAM 和运行时间
 - `CLOCK` 页面：北京时间、日期/星期、联网自动校时、每小时刷新、断网继续走时
 - `SLEEP` 页面：L2 深度休眠、保持 RTC 计时、按键或定时唤醒
+- `PC MON` 页面：通过 Wi-Fi 接收电脑 CPU、内存、GPU、显存和 GPU 温度，兼容 wl1-studio
 - `WIFI` / `BLE` 页面：附近设备扫描、RSSI / 链路分析、运行时连接与开关、应用流量与 echo 回显
 - 双按键 Wi-Fi 密码编辑、设备热点密码查看、BLE 主动连接与主服务 UUID 分析
 - `ARCADE` 页面：三款针对 135×240 小屏和双按键设计的小游戏
@@ -111,6 +112,18 @@ USB 串口支持 `clock` / `clock status` 查询、`clock sync` / `ntp` 手动�
 ESP32 的 RTC 继续计时；KEY1/KEY2 可随时唤醒，回到主菜单。已经校准的时间在
 离线唤醒后仍可显示。电源键关机或完全断电后需重新联网校时。详见
 [深度休眠说明](docs/deep-sleep.md)。
+
+## 无线电脑资源监控
+
+主菜单第 16 张 **PC MON** 卡片，KEY2 打开。总览显示 CPU / RAM / GPU 百分比，
+短按 KEY2 查看 RAM / VRAM 容量及 GPU 温度，KEY1 或长按 KEY2 返回。
+底部显示设备当前 IP；离开页面继续接收，3 秒断流后标记过期并显示 N/A。
+
+在 `wl1-studio` 桌面版的 **ESP32-C3 像素桌宠 → 电脑监控** 填写本 S3 的 IP，
+即可复用原有采集、GPU 开关和轻量托盘后台。两种设备使用相同 UDP 4443 v1 协议。
+也可直接运行上位机的 `pc-monitor-core` 发送例程验证，无需启动完整界面。
+串口支持 `pc` / `pc status` / `pc sample` / `help pc`。
+详见 [监控配置、协议与验收](docs/pc-monitor.md)。
 
 ## 小游戏操作
 
@@ -209,7 +222,7 @@ idf.py -B build/hw-smoke -p /dev/ttyACM0 flash monitor
 验证完成后重新烧录 `build/codex-idf` 中的正式固件。
 
 菜单动画回归使用 `M5_STICKS3_DAP_SMOKE_TEST=ON` 的串口测试入口。它会循环全部
-15 张卡片、快速连按验证排队切换，并进入/返回 AURA、SYSTEM、CLOCK 和 SLEEP；默认固件不含此入口。
+16 张卡片、快速连按验证排队切换，并进入/返回 AURA、SYSTEM、CLOCK、SLEEP 和 PC MON；默认固件不含此入口。
 在已加载 IDF 的容器中构建并烧录：
 
 ```bash

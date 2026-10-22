@@ -37,3 +37,11 @@ target_include_directories(sleep_ui_tests PRIVATE ../ui_stubs ../../components/c
     ../../components/sleep/include ../../components/app_modules/src)
 target_link_libraries(sleep_ui_tests PRIVATE lvgl m)
 add_test(NAME sleep_ui_tests COMMAND sleep_ui_tests)
+
+add_executable(pc_monitor_ui_tests ../pc_monitor_ui_tests.cpp ../../components/app_modules/src/pc_monitor_ui.cpp)
+target_compile_features(pc_monitor_ui_tests PRIVATE cxx_std_20)
+target_compile_options(pc_monitor_ui_tests PRIVATE -Wall -Wextra -Werror)
+target_include_directories(pc_monitor_ui_tests PRIVATE ../ui_stubs ../../components/pc_monitor/include
+    ../../components/connectivity/include ../../components/app_modules/src)
+target_link_libraries(pc_monitor_ui_tests PRIVATE lvgl m)
+add_test(NAME pc_monitor_ui_tests COMMAND pc_monitor_ui_tests)

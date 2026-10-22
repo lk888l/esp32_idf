@@ -12,6 +12,7 @@ idf_component_register(
         "src/debug_ui.cpp"
         "src/clock_ui.cpp"
         "src/sleep_ui.cpp"
+        "src/pc_monitor_ui.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -32,6 +33,7 @@ idf_component_register(
         debug_probe
         clock
         sleep
+        pc_monitor
 )
 
 if(M5_STICKS3_HW_SMOKE_TEST)

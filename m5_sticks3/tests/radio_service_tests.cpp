@@ -6,6 +6,7 @@
 #include "sdkconfig.h"
 #include "../components/connectivity/src/serial_console.hpp"
 #include "cJSON.h"
+#include "pc_monitor_service.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -18,6 +19,13 @@ esp_err_t SerialConsole::start_console(RequestHandler handler, void* context)
 { fake::serial = handler; fake::context = context; return ESP_OK; }
 esp_err_t SerialConsole::stop_console() { fake::serial = nullptr; return ESP_OK; }
 void SerialConsole::main() {}
+}
+namespace fake { pc_monitor::Snapshot pc; }
+namespace pc_monitor {
+Service::~Service() = default;
+void Service::process(bool) {}
+void Service::deinitialize() { fake::pc = {}; }
+Snapshot snapshot() { return fake::pc; }
 }
 namespace {
 using namespace connectivity;
@@ -64,6 +72,23 @@ void ble_up(Service& service)
     std::strcpy(fake::ble_diag.peer_identity, fake::ble_diag.peer_address);
     fake::ble_diag.peer_identity_type = fake::ble_diag.peer_address_type;
     service.process();
+    check(cli("pc").ok() && cli("pc status").number("port") == 4443, "PC monitor USB status");
+    check(cli("help pc").ok() && cli("capabilities").number("pc_monitor") == 1, "PC monitor discoverable");
+    check(cli("pc sample").ok(), "PC monitor empty sample query");
+    check(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(cli("pc sample").json.get(), "cpu_pct")), "missing sample is null");
+    fake::pc.received = fake::pc.listening = true; fake::pc.stale = false;
+    fake::pc.stats.cpu_valid = true; fake::pc.stats.cpu_pct = 23.5f;
+    check(cli("pc sample").number("cpu_pct") == 23.5, "PC monitor fresh sample");
+    fake::pc.stale = true;
+    check(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(cli("pc sample").json.get(), "cpu_pct")), "stale CPU hidden");
+    fake::pc.stale = false;
+    auto& pc_sample = fake::pc.stats;
+    std::memset(pc_sample.host, '"', sizeof(pc_sample.host) - 1);
+    std::memset(pc_sample.gpu_name, '\\', sizeof(pc_sample.gpu_name) - 1);
+    pc_sample.ram_used = pc_sample.ram_total = pc_sample.vram_used = pc_sample.vram_total = UINT64_MAX;
+    pc_sample.gpu_valid = pc_sample.vram_valid = pc_sample.gpu_temp_valid = true;
+    check(cli("pc sample").ok(), "maximum escaped names and capacities fit USB/HTTP response");
+    fake::pc = {};
 }
 void seed_legacy()
 {
@@ -83,6 +108,8 @@ void common_checks(Service& service)
     check(cli("clock sync").string("error") == "wifi_not_connected", "offline sync rejected");
     check(invoke(R"({"v":1,"id":1,"op":"clock.sync","token":"11111111111111111111111111111111","extra":true})").string("error") == "unknown_field", "strict clock sync schema");
 #ifndef M5_TEST_NO_RADIOS
+    check(invoke(R"({"v":1,"id":1,"op":"pc.status"})", fake::http, 512).ok(), "PC status fits radio response");
+    check(invoke(R"({"v":1,"id":1,"op":"pc.sample"})", fake::ble, 512).ok(), "PC sample readable over BLE");
     check(invoke(R"({"v":1,"id":1,"op":"clock.status"})", fake::http, 512).ok(), "clock query fits radio response");
     check(invoke(R"({"v":1,"id":1,"op":"clock.sync"})", fake::http).string("error") == "unauthorized", "radio sync requires token");
     check(invoke(R"({"v":1,"id":1,"op":"clock.sync"})", fake::ble).string("error") == "unauthorized", "BLE sync requires token");

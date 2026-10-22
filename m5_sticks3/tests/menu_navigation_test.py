@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import serial
 
-CARD_COUNT = 15
+CARD_COUNT = 16
 STATUS = re.compile(
     r"UI TEST page=(\d+) card=(\d+) busy=(\d+) queued=(\d+) "
     r"lv_free=(\d+) lv_largest=(\d+) lv_peak=(\d+)"
@@ -97,17 +97,20 @@ class MenuTest:
             self.read_for(0.2)
             card = (card + 1) % CARD_COUNT + 1
             self.settle(card)
-        for target, page in ((2, 2), (3, 3), (14, 10), (15, 11)):
+        for target, page in ((2, 2), (3, 3), (14, 10), (15, 11), (16, 12)):
             while card != target:
                 card = self.next_card(card)
             self.command("select")
             self.read_for(1)
             self.settle(card, page)
+            if page == 12:
+                self.command("select")
+                self.settle(card, page)
             self.command("next")
             self.read_for(1)
             self.settle(card)
         print(f"PASS: {cycles * CARD_COUNT} normal presses, {bursts * 4} rapid presses, "
-              f"AURA/SYSTEM/CLOCK/SLEEP round trips; LVGL peak={self.peak}, "
+              f"AURA/SYSTEM/CLOCK/SLEEP/PC MON round trips; LVGL peak={self.peak}, "
               f"smallest sampled free block={self.min_largest} bytes")
 
 

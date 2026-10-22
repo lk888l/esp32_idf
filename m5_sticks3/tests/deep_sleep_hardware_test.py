@@ -200,7 +200,7 @@ class SleepTest:
 
     def motion_round_trip(self):
         state = self.settle(page=0)
-        for _ in range(15):
+        for _ in range(16):
             if state["card"] == 1:
                 break
             self.command("next")

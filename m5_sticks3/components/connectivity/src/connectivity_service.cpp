@@ -6,6 +6,7 @@
 #include "serial_console.hpp"
 #include "ble_gateway_protocol.hpp"
 #include "clock_service.hpp"
+#include "pc_monitor_service.hpp"
 
 #include <array>
 #include <atomic>
@@ -221,6 +222,7 @@ struct Service::Impl {
     BleTransport ble;
     SerialConsole console;
     clock_service::Service clock;
+    pc_monitor::Service pc_monitor;
     Settings settings{};
     RadioMemory memory{};
     WifiCredentials current_wifi{};
@@ -690,17 +692,19 @@ struct Service::Impl {
             char topic[16]{};
             if (get("topic") && !copy_string(get("topic"), topic, sizeof(topic))) { fail("invalid_topic"); return; }
             const char* help = nullptr;
-            if (!topic[0]) help = "help [wifi|ble|gatt|clock|protocol]; status; clock [status|sync]; ntp; ping; traffic; capabilities; command TICKET. Quote names/passwords with spaces. No device input echo/history.";
+            if (!topic[0]) help = "help [wifi|ble|gatt|clock|pc|protocol]; status; clock [status|sync]; pc [status|sample]; ntp; ping; traffic; capabilities; command TICKET. Quote names/passwords with spaces. No device input echo/history.";
             else if (!strcmp(topic, "wifi")) help = "wifi status|scan|results [INDEX]|saved [SLOT]|on|off|disconnect|reconnect|remember; wifi connect SSID PASSWORD [--remember|--temporary]; wifi use SLOT; wifi forget SLOT|all. Empty password: \"\". Default: remember after DHCP; 4 stable slots (0..3).";
             else if (!strcmp(topic, "ble")) help = "ble status|scan|results [INDEX]|peer [INDEX]|saved [SLOT]|bonds [INDEX]|on|off|disconnect|reconnect|remember; ble connect ADDRESS TYPE [--remember|--temporary]; ble use SLOT; ble forget SLOT|all; ble unpair ADDRESS TYPE|all. TYPE: public/random/public-id/random-id (0..3). Forget removes profile; unpair removes security keys.";
             else if (!strcmp(topic, "protocol")) help = "Input: CLI or one API v1 JSON object per LF/CRLF (JSON <=256 bytes). Output: RS (0x1e), JSON, LF; ignore logs outside records. accepted + ticket means queued; command TICKET reports applied/error. Poll wifi/ble status for actual link and memory result. Physical USB is trusted; radio mutations require token. Tickets expire after 16 accepted commands or reboot.";
             else if (!strcmp(topic, "gatt")) help = "gatt status; gatt services|mtu|pair GENERATION; gatt characteristics|descriptors GENERATION HANDLE END; gatt read GENERATION HANDLE; gatt write GENERATION HANDLE HEX; gatt subscribe GENERATION CCCD MODE (0=off,1=notify,2=indicate); gatt result TICKET [INDEX [OFFSET]]; gatt events GENERATION [AFTER]. Poll result until complete/failed; generation comes from status.";
             else if (!strcmp(topic, "clock")) help = "clock [status]: local time/date, timezone, SNTP state and sync age. clock sync / ntp: request SNTP over connected Wi-Fi STA; poll clock status for success. Auto-sync on connection and every hour; offline time keeps ticking. Radio clock.sync requires token. Requests coalesce; retry cooldown 10 s.";
+            else if (!strcmp(topic, "pc")) help = "pc [status]: UDP 4443 receiver, age, accepted/rejected/out-of-order counts. pc sample: latest CPU/RAM/GPU/VRAM/temperature; null means unavailable. Stale after 3 seconds. Start wl1-studio computer monitoring using this device IP. K2 flips PC MON pages; K1 returns. Reception continues on other pages.";
             else { fail("invalid_topic"); return; }
             built = cJSON_AddStringToObject(response.get(), "help", help) != nullptr;
         } else if (op == "capabilities") {
             number("api", 1); number("request_bytes", kMaxRequestBytes);
             number("clock", 1);
+            number("pc_monitor", 1); number("pc_monitor_port", pc_monitor::udp_port);
             number("response_bytes", capacity - 1); number("memory_slots", kMemorySlots);
             number("command_history", CommandHistory::capacity); number("queue_capacity", kCommandCapacity);
 #if CONFIG_M5_CONNECTIVITY_WIFI_ENABLED
@@ -765,6 +769,28 @@ struct Service::Impl {
                 number("index", index); string("address", data.bonds[index].address);
                 number("address_type", data.bonds[index].address_type);
             } else if (index != 0) { fail("invalid_index"); return; }
+        } else if (op == "pc.status") {
+            const auto data = pc_monitor::snapshot();
+            number("port", pc_monitor::udp_port); number("listening", data.listening);
+            number("received", data.received); number("stale", data.stale);
+            number("age_ms", data.age_ms); number("accepted", data.accepted);
+            number("rejected", data.rejected); number("out_of_order", data.out_of_order);
+            number("error", data.error); string("session", data.stats.session); number("seq", data.stats.seq);
+        } else if (op == "pc.sample") {
+            const auto data = pc_monitor::snapshot();
+            const auto& sample = data.stats;
+            const bool fresh = data.received && !data.stale;
+            auto optional = [&](const char* key, double value, bool valid) {
+                if (valid && fresh) number(key, value);
+                else built = cJSON_AddNullToObject(response.get(), key) != nullptr && built;
+            };
+            number("stale", data.stale); string("host", sample.host); string("gpu_name", sample.gpu_name);
+            optional("cpu_pct", sample.cpu_pct, sample.cpu_valid);
+            optional("ram_used", sample.ram_used, true); optional("ram_total", sample.ram_total, true);
+            optional("gpu_pct", sample.gpu_pct, sample.gpu_valid);
+            optional("vram_used", sample.vram_used, sample.vram_valid);
+            optional("vram_total", sample.vram_total, sample.vram_valid);
+            optional("gpu_temp_c", sample.gpu_temp_c, sample.gpu_temp_valid);
         } else if (op == "clock.status") {
             const auto data = clock_service::snapshot();
             string("state", clock_service::state_name(data.state));
@@ -1048,7 +1074,9 @@ void Service::process()
                  static_cast<unsigned long>(command.id), esp_err_to_name(result));
     }
     self.process_memory();
-    self.clock.process(self.wifi.snapshot().state == WifiState::connected);
+    const auto wifi = self.wifi.snapshot();
+    self.pc_monitor.process(wifi.ap_active || wifi.state == WifiState::connected);
+    self.clock.process(wifi.state == WifiState::connected);
     self.update();
 }
 
@@ -1064,6 +1092,7 @@ esp_err_t Service::deinitialize()
     // Keep the facade and its queue alive until every transport callback exits.
     const auto console_result = self.console.stop_console();
     if (console_result != ESP_OK) return console_result;
+    self.pc_monitor.deinitialize();
     if (self.ble_attempted) {
         const esp_err_t result = self.ble.stop();
         if (result != ESP_OK) return result;
