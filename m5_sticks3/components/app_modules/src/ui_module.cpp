@@ -875,7 +875,7 @@ private:
             lv_obj_align(title, LV_ALIGN_BOTTOM_MID, 0, -9);
         }
 
-        menu_hint_ = create_label(menu_screen_, "100 Hz VQF orientation", &lv_font_montserrat_12,
+        menu_hint_ = create_label(menu_screen_, "200 Hz VQF orientation", &lv_font_montserrat_12,
                                   lv_color_hex(0x95A4BD));
         lv_obj_set_width(menu_hint_, bsp::kDisplayWidth);
         lv_obj_set_style_text_align(menu_hint_, LV_TEXT_ALIGN_CENTER, 0);
@@ -1564,7 +1564,7 @@ private:
     void update_carousel(bool boot)
     {
         constexpr std::array<const char*, 16> descriptions = {
-            "On-demand 100 Hz VQF",
+            "On-demand 200 Hz VQF",
             "Layered aura animation",
             "Memory and uptime",
             "G4 + G5 square wave",
@@ -2125,10 +2125,11 @@ private:
             return;
         }
 
-        constexpr float gain = 0.22f;
-        smoothed_roll_ = approach_angle(smoothed_roll_, sample.roll_deg, gain);
-        smoothed_pitch_ += (sample.pitch_deg - smoothed_pitch_) * gain;
-        smoothed_yaw_ = approach_angle(smoothed_yaw_, sample.yaw_deg - yaw_zero_, gain);
+        // VQF already fuses/filters the sensors. A second output low-pass adds
+        // visible hand-to-screen lag (the former 0.22 gain took ~0.2 s to settle).
+        smoothed_roll_ = approach_angle(smoothed_roll_, sample.roll_deg, 1.0f);
+        smoothed_pitch_ = sample.pitch_deg;
+        smoothed_yaw_ = approach_angle(smoothed_yaw_, sample.yaw_deg - yaw_zero_, 1.0f);
 
         const int8_t status_state = sample.rest_detected ? 1 : 0;
         if (motion_status_state_ != status_state) {

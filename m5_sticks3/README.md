@@ -2,10 +2,12 @@
 
 这是一个基于 ESP-IDF 5.5、LVGL 9 和 VQF 的 M5-StickS3 工程。工程沿用
 `esp_idf_template` 的 `AppModule` / `AppManager` / `AppTask` 分层方式，并参考
-`esp-idf-icm42688` 的 100 Hz 传感器采样与 VQF 6D 姿态解算流程。
+`esp-idf-icm42688` 的 VQF 6D 姿态解算流程，BMI270 现通过 200 Hz FIFO 采样。
 
 > StickS3 板载 IMU 是 **BMI270**，不是 ICM42688。工程使用 Espressif 官方
 > `espressif/bmi270` 驱动，并复用参考工程中的 VQF 实现。
+
+姿态跟手与回零修复、采样验证和独立诊断固件用法见 [运动解算说明](docs/motion.md)。
 
 ## 已实现
 
@@ -175,7 +177,8 @@ WSL 中出现 `/dev/ttyACM0` 后，重启以 `--privileged` 运行的开发容�
 
 ## 任务与刷新策略
 
-- BMI270 + VQF：100 Hz，固定 10 ms 周期，运行在 CPU1
+- BMI270 + VQF：200 Hz FIFO，按真实帧以固定 5 ms 步长积分，CPU1 每 2 ms 轮询；空 FIFO 不更新
+- Roll/Pitch 加速度校正时间常数 0.5 秒，MOTION 显示直接使用融合角度，不叠加输出低通
 - LVGL 数据与游戏呈现：16 ms 周期（最高约 60 Hz），从线程安全的最新快照读取
 - 电池状态：主任务每 1 秒读取 M5PM1 并做低通平滑，不在 LVGL 回调中阻塞 I2C
 - LVGL tick：5 ms；默认刷新周期：10 ms
@@ -192,7 +195,7 @@ WSL 中出现 `/dev/ttyACM0` 后，重启以 `--privileged` 运行的开发容�
 - 按键扫描是独立模块，保持 10 ms 轮询和 30 ms 去抖；稳定的按下、释放边沿通过静态 `ButtonEventBus` 发布。
 - 事件总线包含 8 个队列槽和 4 个订阅槽，事件发布、排队与分发过程不申请堆内存。
 - UI 订阅按键事件；常规页面在释放边沿执行动作，游戏内 KEY2 在按下边沿立即响应，
-  以降低跳跃和护盾延迟。运动数据仍采用最新快照，避免 100 Hz 数据在队列中积压。
+  以降低跳跃和护盾延迟。运动数据仍采用最新快照，避免 200 Hz 数据在 UI 队列中积压。
 
 ## 主机单元测试
 
@@ -207,7 +210,7 @@ ctest --test-dir build/host-tests --output-on-failure
 ## 实机冒烟测试
 
 默认关闭的 `M5_STICKS3_HW_SMOKE_TEST` 会自动依次运行三款游戏，并验证 BMI270 的
-启动、100 Hz 采样和释放流程；结束后自动回到主菜单。请同时使用独立构建目录与独立 SDKCONFIG，避免
+启动、200 Hz FIFO 采样和释放流程；结束后自动回到主菜单。请同时使用独立构建目录与独立 SDKCONFIG，避免
 测试配置写回正式 sdkconfig；以下命令在已加载 IDF 环境的容器工程目录执行：
 
 ```bash

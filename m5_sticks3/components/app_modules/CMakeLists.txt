@@ -40,6 +40,13 @@ if(M5_STICKS3_HW_SMOKE_TEST)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE M5_STICKS3_HW_SMOKE_TEST=1)
 endif()
 
+if(M5_STICKS3_MOTION_DIAGNOSTICS)
+    if(M5_STICKS3_HW_SMOKE_TEST OR M5_STICKS3_RADIO_SMOKE_TEST OR M5_STICKS3_DAP_SMOKE_TEST)
+        message(FATAL_ERROR "Motion diagnostics must run separately from UI smoke tests")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE M5_STICKS3_MOTION_DIAGNOSTICS=1)
+endif()
+
 if(M5_STICKS3_RADIO_SMOKE_TEST)
     if(M5_STICKS3_HW_SMOKE_TEST)
         message(FATAL_ERROR "Choose one independent UI smoke test at a time")

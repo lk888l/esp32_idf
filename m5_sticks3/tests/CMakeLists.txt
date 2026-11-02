@@ -25,6 +25,14 @@ target_include_directories(connectivity_host_tests PRIVATE
 )
 
 enable_testing()
+set(M5_VQF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../esp-idf-icm42688/components/third_party/vqf")
+add_executable(motion_tests motion_tests.cpp "${M5_VQF_DIR}/src/vqf.cpp")
+target_compile_features(motion_tests PRIVATE cxx_std_20)
+target_compile_options(motion_tests PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(motion_tests PRIVATE VQF_SINGLE_PRECISION)
+target_include_directories(motion_tests PRIVATE bsp_stubs ../components/app_modules/include "${M5_VQF_DIR}/include")
+add_test(NAME motion_tests COMMAND motion_tests)
+
 add_executable(pc_monitor_tests pc_monitor_tests.cpp ../components/pc_monitor/src/pc_monitor_protocol.cpp)
 target_compile_features(pc_monitor_tests PRIVATE cxx_std_20)
 target_compile_options(pc_monitor_tests PRIVATE -Wall -Wextra -Werror)
