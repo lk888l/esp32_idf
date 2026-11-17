@@ -253,6 +253,8 @@ Wi-Fi STA + 独立密码备用热点、NimBLE GATT 加密收发、公共 API v1�
 
 设备操作见 [Wi-Fi / BLE 图形界面说明](docs/radio-ui.md)，包含扫描连接、双按键密码输入、BLE 双角色、流量统计口径和已实现边界。完整架构、接口协议、客户端用法与验证方式见 [通信框架文档](docs/connectivity.md)。
 
+新增 [设备本地网页与 100 Hz 实时姿态流](docs/web-connectivity.md)：浏览器访问设备 IP，通过 WIFI → Local hotspot 屏幕上的一次性码授权；支持双客户端、命令去重与断线重订阅。PC/手机网页无需外部服务器。
+
 ## 无线接口回归
 
 连接设备热点或所在局域网后，可从电脑执行：

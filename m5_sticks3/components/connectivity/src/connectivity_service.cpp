@@ -1,4 +1,5 @@
 #include "connectivity_service.hpp"
+#include "web_pairing.hpp"
 #include "connectivity_runtime.hpp"
 #include "connectivity_policy.hpp"
 #include "wifi_transport.hpp"
@@ -44,7 +45,7 @@ TrafficSnapshot shared_traffic{};
 MemorySnapshot shared_memory{};
 portMUX_TYPE history_lock = portMUX_INITIALIZER_UNLOCKED;
 CommandHistory history{};
-enum class Origin { http, ble, serial };
+enum class Origin { http, ble, serial, session };
 char local_ap_password[17]{};
 using LocalSubmit = esp_err_t (*)(void*, const ControlRequest&);
 LocalSubmit local_submit = nullptr;
@@ -284,6 +285,7 @@ struct Service::Impl {
         case ControlAction::wifi_forget: case ControlAction::ble_forget:
             if (!request.all && request.slot >= kMemorySlots) return ESP_ERR_INVALID_ARG;
             break;
+        case ControlAction::wifi_hotspot:
         case ControlAction::wifi_scan: case ControlAction::wifi_reconnect:
         case ControlAction::wifi_disconnect: case ControlAction::wifi_enable:
         case ControlAction::wifi_disable: case ControlAction::wifi_clear:
@@ -420,6 +422,7 @@ struct Service::Impl {
     esp_err_t execute(const ControlRequest& request, uint32_t ticket)
     {
         switch (request.action) {
+        case ControlAction::wifi_hotspot: return wifi.open_hotspot();
         case ControlAction::ble_gatt: return ble.request_gatt(request.gatt, ticket);
         case ControlAction::wifi_scan: return wifi.request_scan();
         case ControlAction::wifi_enable: return wifi.set_enabled(true);
@@ -570,6 +573,11 @@ struct Service::Impl {
         portEXIT_CRITICAL(&state_lock);
     }
 
+    static void handle_session(void* context, const char* input, size_t length, char* output, size_t capacity)
+    {
+        static_cast<Impl*>(context)->request(input, length, output, capacity, Origin::session);
+    }
+
     static void handle_wifi(void* context, const char* input, size_t length,
                             char* output, size_t capacity)
     {
@@ -660,7 +668,7 @@ struct Service::Impl {
             // Attribute values and notifications are private; radio queries
             // require the same authentication as gateway mutations.
             char token[33]{};
-            if (origin != Origin::serial && (!copy_string(get("token"), token, sizeof(token)) ||
+            if (origin != Origin::serial && origin != Origin::session && (!copy_string(get("token"), token, sizeof(token)) ||
                 !constant_time_equal(token, settings.token))) { fail("unauthorized"); return; }
             gateway::dispatch(root.get(), id, ble,
                 [](void* context, const gateway::Request& request, uint32_t request_id, uint32_t* ticket) {
@@ -688,7 +696,11 @@ struct Service::Impl {
             copy_display_utf8(value, safe, sizeof(safe));
             built = cJSON_AddStringToObject(response.get(), key, safe) != nullptr && built;
         };
-        if (op == "help") {
+        if (op == "web.pair" || op == "web.revoke") {
+            if (origin != Origin::serial) { fail("physical_only"); return; }
+            if (op == "web.pair") number("code", open_web_pairing());
+            else revoke_web_sessions();
+        } else if (op == "help") {
             char topic[16]{};
             if (get("topic") && !copy_string(get("topic"), topic, sizeof(topic))) { fail("invalid_topic"); return; }
             const char* help = nullptr;
@@ -703,6 +715,11 @@ struct Service::Impl {
             built = cJSON_AddStringToObject(response.get(), "help", help) != nullptr;
         } else if (op == "capabilities") {
             number("api", 1); number("request_bytes", kMaxRequestBytes);
+#if CONFIG_M5_CONNECTIVITY_WIFI_ENABLED
+            number("web_stream", 1);
+#else
+            number("web_stream", 0);
+#endif
             number("clock", 1);
             number("pc_monitor", 1); number("pc_monitor_port", pc_monitor::udp_port);
             number("response_bytes", capacity - 1); number("memory_slots", kMemorySlots);
@@ -719,7 +736,7 @@ struct Service::Impl {
             number("ble", 0);
             number("ble_gateway", 0);
 #endif
-            string("serial_framing", "RS-JSON-LF"); string("auth", origin == Origin::serial ? "physical" : "token");
+            string("serial_framing", "RS-JSON-LF"); string("auth", origin == Origin::serial ? "physical" : origin == Origin::session ? "session" : "token");
         } else if (op == "command.result") {
             uint32_t ticket;
             if (!unsigned_json(get("ticket"), UINT32_MAX, ticket) || !ticket) { fail("invalid_ticket"); return; }
@@ -802,7 +819,7 @@ struct Service::Impl {
             number("interval_s", clock_service::sync_interval_s()); number("error", data.error);
         } else if (op == "clock.sync") {
             char token[33]{};
-            if (origin != Origin::serial && (!copy_string(get("token"), token, sizeof(token)) ||
+            if (origin != Origin::serial && origin != Origin::session && (!copy_string(get("token"), token, sizeof(token)) ||
                 !constant_time_equal(token, settings.token))) { fail("unauthorized"); return; }
             for (const auto* field = root->child; field; field = field->next) {
                 const std::string_view name(field->string);
@@ -916,6 +933,7 @@ struct Service::Impl {
             else if (op == "wifi.use") command.action = ControlAction::wifi_use;
             else if (op == "wifi.clear") command.action = ControlAction::wifi_clear;
             else if (op == "wifi.scan") command.action = ControlAction::wifi_scan;
+            else if (op == "wifi.hotspot") command.action = ControlAction::wifi_hotspot;
             else if (op == "wifi.reconnect") command.action = ControlAction::wifi_reconnect;
             else if (op == "wifi.disconnect") command.action = ControlAction::wifi_disconnect;
             else if (op == "wifi.enable") command.action = ControlAction::wifi_enable;
@@ -932,7 +950,7 @@ struct Service::Impl {
             else if (op == "ble.unpair") command.action = ControlAction::ble_unpair;
             else { fail("unknown_operation"); return; }
             char token[33]{};
-            if (origin != Origin::serial && (!copy_string(get("token"), token, sizeof(token)) ||
+            if (origin != Origin::serial && origin != Origin::session && (!copy_string(get("token"), token, sizeof(token)) ||
                 !constant_time_equal(token, settings.token))) { fail("unauthorized"); return; }
             const bool wifi_connect = command.action == ControlAction::wifi_connect || command.action == ControlAction::wifi_configure;
             const bool ble_connect = command.action == ControlAction::ble_connect;
@@ -1023,7 +1041,7 @@ esp_err_t Service::initialize()
     snprintf(name, sizeof(name), "M5StickS3-%02X%02X%02X", mac[3], mac[4], mac[5]);
 #if CONFIG_M5_CONNECTIVITY_WIFI_ENABLED
     self.wifi_attempted = true;
-    result = self.wifi.start(Impl::handle_wifi, &self, name, self.settings.ap_password, self.current_wifi);
+    result = self.wifi.start(Impl::handle_wifi, &self, name, self.settings.ap_password, self.current_wifi, Impl::handle_session);
     if (result != ESP_OK) return result;
     self.wifi_started = true;
 #endif
@@ -1042,8 +1060,10 @@ esp_err_t Service::initialize()
     self.update();
     ESP_LOGI(kTag, "ready: %s (API v1)", name);
     // Physical USB console is the bootstrap channel; never return these over radio.
+#if CONFIG_M5_CONNECTIVITY_LOG_SECRETS
     ESP_LOGI(kTag, "local setup: AP password=%s", self.settings.ap_password);
     ESP_LOGI(kTag, "local setup: API token=%s", self.settings.token);
+#endif
     return ESP_OK;
 }
 
@@ -1092,6 +1112,7 @@ esp_err_t Service::deinitialize()
     // Keep the facade and its queue alive until every transport callback exits.
     const auto console_result = self.console.stop_console();
     if (console_result != ESP_OK) return console_result;
+    revoke_web_sessions();
     self.pc_monitor.deinitialize();
     if (self.ble_attempted) {
         const esp_err_t result = self.ble.stop();

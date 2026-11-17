@@ -9,9 +9,15 @@ menu "M5-StickS3 connectivity"
             Paused while USB CMSIS-DAP owns the internal PHY.
     config M5_CONNECTIVITY_WIFI_ENABLED
         bool "Enable Wi-Fi AP/STA and local HTTP API"
+        select HTTPD_WS_SUPPORT
+        select HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT
         default y
     config M5_CONNECTIVITY_BLE_ENABLED
         bool "Enable NimBLE GATT transport"
         depends on BT_NIMBLE_ENABLED
         default y
 endmenu
+
+config M5_CONNECTIVITY_LOG_SECRETS
+    bool "Log legacy credentials on physical USB (development only)"
+    default n

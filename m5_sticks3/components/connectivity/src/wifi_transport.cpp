@@ -1,4 +1,6 @@
 #include "wifi_transport.hpp"
+#include "web_service.hpp"
+#include "esp_random.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -139,7 +141,7 @@ WifiTransport::~WifiTransport()
 }
 
 esp_err_t WifiTransport::start(RequestHandler handler, void* context, const char* ap_ssid,
-                               const char* ap_password, const WifiCredentials& initial)
+                               const char* ap_password, const WifiCredentials& initial, RequestHandler session_handler)
 {
     if (!handler || !ap_ssid || !ap_password || !credentials_valid_or_disabled(initial))
         return ESP_ERR_INVALID_ARG;
@@ -150,6 +152,7 @@ esp_err_t WifiTransport::start(RequestHandler handler, void* context, const char
     if (driver_initialized_ || sta_netif_ || ap_netif_ || http_ || wifi_events_ || ip_events_)
         return ESP_ERR_INVALID_STATE;
 
+    session_handler_ = session_handler ? session_handler : handler;
     handler_ = handler;
     context_ = context;
     {
@@ -243,6 +246,11 @@ esp_err_t WifiTransport::start(RequestHandler handler, void* context, const char
         error = esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID,
                     event_handler, this, &ip_events_);
         if (error != ESP_OK) return error;
+        if (initial.ssid[0]) {
+            error = esp_wifi_set_mode(WIFI_MODE_STA);
+            if (error != ESP_OK) return error;
+        }
+        hotspot_until_ = esp_timer_get_time() + 120'000'000;
         driver_start_attempted_ = true;
         error = esp_wifi_start();
         if (error != ESP_OK) return error;
@@ -260,7 +268,7 @@ esp_err_t WifiTransport::start(RequestHandler handler, void* context, const char
         StateGuard guard(state_lock_);
         state_.state = WifiState::failed;
     } else {
-        ESP_LOGI(kTag, "Protected AP active; HTTP API port 80, maximum 2 AP clients");
+        ESP_LOGI(kTag, "Local HTTP/WS port 80; recovery AP available from physical UI");
     }
     return result;
 }
@@ -269,12 +277,16 @@ esp_err_t WifiTransport::start_http()
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
-    config.max_uri_handlers = 2;
-    config.max_open_sockets = 4;
-    config.lru_purge_enable = true;
+    config.max_uri_handlers = 8;
+    config.max_open_sockets = 7;
+    config.lru_purge_enable = false;
     config.recv_wait_timeout = 2;
     config.send_wait_timeout = 2;
     esp_err_t result = httpd_start(&http_, &config);
+    if (result != ESP_OK) return result;
+    web_ = WebService::create(http_, session_handler_, context_);
+    if (!web_) return ESP_ERR_NO_MEM;
+    result = web_->start();
     if (result != ESP_OK) return result;
     httpd_uri_t status{};
     status.uri = "/api/v1/status";
@@ -318,6 +330,7 @@ esp_err_t WifiTransport::stop()
         result = httpd_stop(http_);
         if (result != ESP_OK) return result;
         http_ = nullptr;
+        WebService::destroy(web_); web_ = nullptr;
     }
     if (driver_start_attempted_) {
         result = esp_wifi_stop();
@@ -708,12 +721,29 @@ void WifiTransport::schedule_retry_locked(int64_t now_us)
     state_.rssi = 0;
     diagnostics_.bssid[0] = '\0';
     connect_deadline_us_ = 0;
-    next_connect_us_ = now_us + static_cast<int64_t>(backoff_.next_delay_ms()) * 1000;
+    const uint32_t delay = backoff_.next_delay_ms();
+    next_connect_us_ = now_us + static_cast<int64_t>(delay - delay / 8 + esp_random() % (delay / 4 + 1)) * 1000;
+}
+
+esp_err_t WifiTransport::open_hotspot()
+{
+    if (!driver_initialized_) return ESP_ERR_INVALID_STATE;
+    const auto result = set_enabled(true);
+    if (result != ESP_OK) return result;
+    hotspot_until_ = esp_timer_get_time() + 120'000'000;
+    return esp_wifi_set_mode(WIFI_MODE_APSTA);
 }
 
 void WifiTransport::process()
 {
     const int64_t now = esp_timer_get_time();
+    if (web_) web_->process();
+    const auto current = snapshot();
+    if (current.ap_active && current.state == WifiState::connected && now > hotspot_until_) {
+        wifi_sta_list_t clients{};
+        if (esp_wifi_ap_get_sta_list(&clients) == ESP_OK && clients.num == 0)
+            esp_wifi_set_mode(WIFI_MODE_STA);
+    }
     bool scan_done = false;
     bool scan_timeout = false;
     esp_err_t scan_status = ESP_OK;
@@ -971,7 +1001,7 @@ esp_err_t WifiTransport::error_handler(httpd_req_t* request, httpd_err_code_t er
 #else
 
 WifiTransport::~WifiTransport() = default;
-esp_err_t WifiTransport::start(RequestHandler, void*, const char*, const char*, const WifiCredentials&)
+esp_err_t WifiTransport::start(RequestHandler, void*, const char*, const char*, const WifiCredentials&, RequestHandler)
 {
     return ESP_ERR_NOT_SUPPORTED;
 }
@@ -983,6 +1013,7 @@ bool WifiTransport::connection_matches(const WifiCredentials&) { return false; }
 esp_err_t WifiTransport::request_scan() { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t WifiTransport::set_enabled(bool) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t WifiTransport::disconnect_station() { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t WifiTransport::open_hotspot() { return ESP_ERR_NOT_SUPPORTED; }
 WifiSnapshot WifiTransport::snapshot() { return {}; }
 WifiDiagnostics WifiTransport::diagnostics() { return {}; }
 

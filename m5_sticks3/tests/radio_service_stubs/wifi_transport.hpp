@@ -12,7 +12,7 @@ inline bool association_matches = true;
 namespace connectivity {
 class WifiTransport {
 public:
-    int start(RequestHandler handler, void* context, const char*, const char*, const WifiCredentials& initial)
+    int start(RequestHandler handler, void* context, const char*, const char*, const WifiCredentials& initial, RequestHandler = nullptr)
     {
         fake::http = handler; fake::context = context; fake::wifi = {}; fake::wifi_diag = {};
         fake::wifi_diag.enabled = true; return configure(initial);
@@ -27,6 +27,7 @@ public:
         fake::wifi.state = value.ssid[0] ? WifiState::connecting : WifiState::access_point;
         fake::wifi.address[0] = 0; return ESP_OK;
     }
+    int open_hotspot() { return ESP_OK; }
     int request_scan() { fake::wifi_diag.scanning = true; return ESP_OK; }
     bool connection_matches(const WifiCredentials&) { return fake::association_matches; }
     int set_enabled(bool enabled) { fake::wifi_diag.enabled = enabled; if (!enabled) fake::wifi.state = WifiState::stopped; return ESP_OK; }

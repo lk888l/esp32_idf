@@ -1,3 +1,4 @@
+#include "web_pairing.hpp"
 #include "radio_ui.hpp"
 
 #include <algorithm>
@@ -338,6 +339,7 @@ struct RadioUi::Impl {
         std::snprintf(text, sizeof(text), wifi() ? "2.4 GHz   CH %u" : "GATT   MTU %u",
                       wifi() ? wd.channel : status.ble.mtu);
         set_text(subhead, text);
+        if (view != View::credentials) set_text(footer, "K1 NEXT  K2 OK\nHOLD K2 BACK");
         if (view == View::overview) {
             if (wifi()) {
                 char ssid[33];
@@ -522,6 +524,7 @@ struct RadioUi::Impl {
             }
         } else if (view == View::credentials) {
             set_text(headline, "LOCAL AP");
+            set_text(footer, "K1 BACK K2 NEW\nHOLD K2 REVOKE");
             set_text(subhead, "Private / on-device");
             char secret[17]{};
             if (!connectivity::copy_local_ap_password(secret, sizeof(secret)))
@@ -531,7 +534,10 @@ struct RadioUi::Impl {
                 status.wifi.ap_address, secret, tail(secret, 8));
             set_text(body, text);
             wipe(secret, sizeof(secret));
-            set_text(action, "> Back");
+            const auto code = connectivity::local_web_pairing_code();
+            std::snprintf(text, sizeof(text), "Web code: %06lu", static_cast<unsigned long>(code));
+            set_text(subhead, code ? text : "Code expired / used");
+            set_text(action, "> New web code");
         } else if (view == View::password_group || view == View::password_character) {
             set_text(headline, "PASSWORD");
             char mask[17]{};
@@ -598,6 +604,10 @@ struct RadioUi::Impl {
         if (back) {
             switch (view) {
             case View::overview: return true;
+            case View::credentials:
+                connectivity::revoke_web_sessions();
+                connectivity::open_web_pairing();
+                break;
             case View::password_character: enter(View::password_group); break;
             case View::password_group:
                 wipe(password, sizeof(password)); enter(View::target); choice = 0; break;
@@ -626,7 +636,10 @@ struct RadioUi::Impl {
                 else command(wifi() ? connectivity::ControlAction::wifi_enable
                                     : connectivity::ControlAction::ble_enable);
                 break;
-            case 7: enter(View::credentials); break;
+            case 7:
+                command(connectivity::ControlAction::wifi_hotspot);
+                connectivity::open_web_pairing();
+                enter(View::credentials); break;
             }
             break;
         case View::nearby: {
@@ -699,7 +712,7 @@ struct RadioUi::Impl {
         case View::link: page = (page + 1) % (wifi() ? 3 : 2); break;
         case View::traffic: page = (page + 1) % 2; break;
         case View::services: ++page; break;
-        case View::credentials: enter(View::overview); choice = 0; break;
+        case View::credentials: connectivity::open_web_pairing(); break;
         case View::confirm_radio_off:
             enter(View::overview); choice = 0;
             command(wifi() ? connectivity::ControlAction::wifi_disable

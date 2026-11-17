@@ -50,6 +50,7 @@ inline int esp_event_loop_create_default() { return ESP_OK; }
 inline int esp_event_loop_delete_default() { return ESP_OK; }
 constexpr int ESP_MAC_WIFI_STA = 0, MALLOC_CAP_INTERNAL = 1, MALLOC_CAP_DMA = 2;
 inline int esp_read_mac(uint8_t* mac, int) { std::memset(mac, 1, 6); return ESP_OK; }
+inline uint32_t esp_random() { return 0x12345678; }
 inline void esp_fill_random(void* bytes, size_t size) { std::memset(bytes, 0x21, size); }
 inline void bootloader_random_enable() {}
 inline void bootloader_random_disable() {}

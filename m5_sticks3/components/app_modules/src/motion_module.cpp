@@ -16,6 +16,7 @@
 #include "motion_fifo.hpp"
 #include "motion_runtime.hpp"
 #include "motion_state.hpp"
+#include "motion_stream.hpp"
 #include "vqf.hpp"
 
 #include "freertos/FreeRTOS.h"
@@ -45,6 +46,7 @@ private:
         model::MotionSample published{};
         Bmi270Fifo::Batch batch;
         uint32_t failures = 0;
+        int64_t sample_time = 0;
         int64_t last_sample = esp_timer_get_time();
 #ifdef M5_STICKS3_MOTION_DIAGNOSTICS
         int64_t last_log = 0;
@@ -56,8 +58,14 @@ private:
             const esp_err_t result = fifo_.read_batch(batch);
             if (result == ESP_OK) {
                 failures = 0;
+                const int64_t acquired = esp_timer_get_time();
                 for (size_t frame = 0; frame < batch.count; ++frame) {
                     const ImuSample& sample = batch.samples[frame];
+                    // Anchor every FIFO batch to the monotonic read time. A
+                    // free-running nominal 200 Hz clock would drift against
+                    // the actual sensor oscillator during long recordings.
+                    const int64_t estimated = acquired - (batch.count - frame - 1) * 5000;
+                    sample_time = std::max(sample_time + 1, estimated);
                     const float norm_squared = sample.accel_g[0] * sample.accel_g[0] +
                         sample.accel_g[1] * sample.accel_g[1] + sample.accel_g[2] * sample.accel_g[2];
                     if (!published.valid && norm_squared < 0.04f) continue;
@@ -78,6 +86,10 @@ private:
                     published.rest_detected = vqf.getRestDetected();
                     published.valid = true;
                     ++published.sample_count;
+                    if ((published.sample_count % 2) == 0) {
+                        model::MotionStream::instance().publish({static_cast<uint64_t>(sample_time), 0,
+                            published.roll_deg, published.pitch_deg, published.yaw_deg, published.valid});
+                    }
                     last_sample = esp_timer_get_time();
                 }
                 // Publish the newest result, without queuing old poses for UI.
@@ -124,13 +136,14 @@ public:
 
     void process() override
     {
-        const bool requested = motion_requested.load(std::memory_order_acquire);
+        const bool requested = motion_requested.load(std::memory_order_acquire) ||
+                               model::MotionStream::instance().requested();
         const MotionRuntimeState state = runtime_state.load(std::memory_order_acquire);
 
         if (requested && state == MotionRuntimeState::stopped) {
             runtime_state.store(MotionRuntimeState::starting, std::memory_order_release);
             model::MotionState::instance().publish({});
-            ESP_LOGI(kTag, "MOTION page opened; initializing BMI270");
+            ESP_LOGI(kTag, "Motion consumer active; initializing BMI270");
             if (start_runtime()) {
                 runtime_state.store(MotionRuntimeState::running, std::memory_order_release);
             } else {
@@ -148,7 +161,7 @@ public:
             if (stop_runtime()) {
                 model::MotionState::instance().publish({});
                 runtime_state.store(MotionRuntimeState::stopped, std::memory_order_release);
-                ESP_LOGI(kTag, "MOTION page closed; BMI270 stopped and released");
+                ESP_LOGI(kTag, "Last motion consumer released; BMI270 stopped");
             } else {
                 runtime_state.store(MotionRuntimeState::failed, std::memory_order_release);
             }
@@ -311,7 +324,6 @@ void request_motion_enabled(bool enabled)
         return;
     }
 
-    model::MotionState::instance().publish({});
     ESP_LOGI(kTag, "motion runtime %s requested", enabled ? "start" : "stop");
 }
 

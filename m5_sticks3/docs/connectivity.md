@@ -1,3 +1,5 @@
+> 当前版本新增设备内置网页、短期会话及 100 Hz WebSocket 姿态流，使用方式和协议见 [本地网页与实时通信](web-connectivity.md)。启动秘密日志默认关闭；有凭据时默认只启动 STA，可在 WIFI → Local hotspot 实体开启恢复热点。下文原始快速使用中的串口令牌和常开 AP 描述属于旧版行为，API v1 仍兼容。
+
 # Wi-Fi / BLE 快速使用
 
 工程仍沿用原有 AppModule / AppManager / AppTask。新增的 connectivity 组件负责通信协议，

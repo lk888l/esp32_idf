@@ -21,7 +21,7 @@ struct Snapshot {
 enum class ControlAction : uint8_t {
     wifi_scan, wifi_connect, wifi_reconnect, wifi_disconnect,
     wifi_enable, wifi_disable, wifi_clear, wifi_configure,
-    wifi_remember, wifi_forget, wifi_use,
+    wifi_hotspot, wifi_remember, wifi_forget, wifi_use,
     ble_scan, ble_connect, ble_disconnect, ble_enable, ble_disable,
     ble_remember, ble_forget, ble_use, ble_reconnect, ble_unpair, ble_gatt
 };

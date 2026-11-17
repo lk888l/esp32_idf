@@ -14,6 +14,7 @@ namespace connectivity {
 
 // Lifecycle and configuration belong to the AppModule owner task. IDF event
 // and HTTP tasks only publish bounded state or invoke the request dispatcher.
+class WebService;
 class WifiTransport final {
 public:
     WifiTransport() = default;
@@ -24,9 +25,10 @@ public:
 
     // The owner initializes NVS, esp_netif and the default event loop first.
     // Empty STA credentials leave the STA idle; APSTA mode also permits scans.
-    // The password-protected AP remains available while the radio is enabled.
+    // Saved credentials boot in STA mode; open_hotspot enables recovery APSTA.
     esp_err_t start(RequestHandler handler, void* context, const char* ap_ssid,
-                    const char* ap_password, const WifiCredentials& initial);
+                    const char* ap_password, const WifiCredentials& initial,
+                    RequestHandler session_handler = nullptr);
     esp_err_t stop();
     void process();
     // Owner-task preflight, without side effects. Check before persisting a
@@ -44,6 +46,7 @@ public:
     esp_err_t request_scan();
     esp_err_t set_enabled(bool enabled);
     esp_err_t disconnect_station();
+    esp_err_t open_hotspot();
     WifiSnapshot snapshot();
     WifiDiagnostics diagnostics();
 
@@ -72,6 +75,9 @@ private:
     esp_event_handler_instance_t wifi_events_ = nullptr;
     esp_event_handler_instance_t ip_events_ = nullptr;
     httpd_handle_t http_ = nullptr;
+    WebService* web_ = nullptr;
+    RequestHandler session_handler_ = nullptr;
+    int64_t hotspot_until_ = 0;
     RequestHandler handler_ = nullptr;
     void* context_ = nullptr;
 
